@@ -1,3 +1,5 @@
+This repo contains build for native librocksdb (with no libsnappy dependency) for Nuget.org package
+
 ## RocksDB: A Persistent Key-Value Store for Flash and RAM Storage
 
 [![Linux/Mac Build Status](https://travis-ci.org/facebook/rocksdb.svg?branch=master)](https://travis-ci.org/facebook/rocksdb)
