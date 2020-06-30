@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd">
   <metadata>
     <id>RockDb.Native</id>
-    <version>6.11.0</version>
+    <version>6.11.1</version>
     <authors>Skird</authors>
     <owners>Skird</owners>
     <licenseUrl>https://github.com/facebook/rocksdb/blob/master/COPYING</licenseUrl>
