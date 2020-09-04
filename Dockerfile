@@ -1,4 +1,4 @@
-FROM debian:stretch
+FROM ubuntu:xenial
 RUN apt update && apt install -y cmake g++
 WORKDIR /rocksdb
 COPY . .
