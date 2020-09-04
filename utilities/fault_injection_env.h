@@ -17,16 +17,12 @@
 #include <set>
 #include <string>
 
-#include "db/version_set.h"
-#include "env/mock_env.h"
 #include "file/filename.h"
-#include "rocksdb/db.h"
 #include "rocksdb/env.h"
 #include "util/mutexlock.h"
-#include "util/random.h"
 
 namespace ROCKSDB_NAMESPACE {
-
+class Random;
 class TestWritableFile;
 class FaultInjectionTestEnv;
 
@@ -126,7 +122,7 @@ class FaultInjectionTestEnv : public EnvWrapper {
  public:
   explicit FaultInjectionTestEnv(Env* base)
       : EnvWrapper(base), filesystem_active_(true) {}
-  virtual ~FaultInjectionTestEnv() {}
+  virtual ~FaultInjectionTestEnv() { error_.PermitUncheckedError(); }
 
   Status NewDirectory(const std::string& name,
                       std::unique_ptr<Directory>* result) override;

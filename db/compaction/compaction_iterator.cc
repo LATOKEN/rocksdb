@@ -40,7 +40,7 @@ CompactionIterator::CompactionIterator(
     const CompactionFilter* compaction_filter,
     const std::atomic<bool>* shutting_down,
     const SequenceNumber preserve_deletes_seqnum,
-    const std::atomic<bool>* manual_compaction_paused,
+    const std::atomic<int>* manual_compaction_paused,
     const std::shared_ptr<Logger> info_log)
     : CompactionIterator(
           input, cmp, merge_helper, last_sequence, snapshots,
@@ -62,7 +62,7 @@ CompactionIterator::CompactionIterator(
     const CompactionFilter* compaction_filter,
     const std::atomic<bool>* shutting_down,
     const SequenceNumber preserve_deletes_seqnum,
-    const std::atomic<bool>* manual_compaction_paused,
+    const std::atomic<int>* manual_compaction_paused,
     const std::shared_ptr<Logger> info_log)
     : input_(input),
       cmp_(cmp),
@@ -86,8 +86,10 @@ CompactionIterator::CompactionIterator(
       info_log_(info_log) {
   assert(compaction_filter_ == nullptr || compaction_ != nullptr);
   assert(snapshots_ != nullptr);
-  bottommost_level_ =
-      compaction_ == nullptr ? false : compaction_->bottommost_level();
+  bottommost_level_ = compaction_ == nullptr
+                          ? false
+                          : compaction_->bottommost_level() &&
+                                !compaction_->allow_ingest_behind();
   if (compaction_ != nullptr) {
     level_ptrs_ = std::vector<size_t>(compaction_->number_levels(), 0);
   }
@@ -182,7 +184,7 @@ void CompactionIterator::Next() {
   PrepareOutput();
 }
 
-void CompactionIterator::InvokeFilterIfNeeded(bool* need_skip,
+bool CompactionIterator::InvokeFilterIfNeeded(bool* need_skip,
                                               Slice* skip_until) {
   if (compaction_filter_ != nullptr &&
       (ikey_.type == kTypeValue || ikey_.type == kTypeBlobIndex)) {
@@ -225,14 +227,31 @@ void CompactionIterator::InvokeFilterIfNeeded(bool* need_skip,
       value_.clear();
       iter_stats_.num_record_drop_user++;
     } else if (filter == CompactionFilter::Decision::kChangeValue) {
+      if (ikey_.type == kTypeBlobIndex) {
+        // value transfer from blob file to inlined data
+        ikey_.type = kTypeValue;
+        current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type);
+      }
       value_ = compaction_filter_value_;
     } else if (filter == CompactionFilter::Decision::kRemoveAndSkipUntil) {
       *need_skip = true;
       compaction_filter_skip_until_.ConvertFromUserKey(kMaxSequenceNumber,
                                                        kValueTypeForSeek);
       *skip_until = compaction_filter_skip_until_.Encode();
+    } else if (filter == CompactionFilter::Decision::kChangeBlobIndex) {
+      if (ikey_.type == kTypeValue) {
+        // value transfer from inlined data to blob file
+        ikey_.type = kTypeBlobIndex;
+        current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type);
+      }
+      value_ = compaction_filter_value_;
+    } else if (filter == CompactionFilter::Decision::kIOError) {
+      status_ =
+          Status::IOError("Failed to access blob during compaction filter");
+      return false;
     }
   }
+  return true;
 }
 
 void CompactionIterator::NextFromInput() {
@@ -246,6 +265,7 @@ void CompactionIterator::NextFromInput() {
     iter_stats_.num_input_records++;
 
     if (!ParseInternalKey(key_, &ikey_)) {
+      iter_stats_.num_input_corrupt_records++;
       // If `expect_valid_internal_key_` is false, return the corrupted key
       // and let the caller decide what to do with it.
       // TODO(noetzli): We should have a more elegant solution for this.
@@ -258,7 +278,6 @@ void CompactionIterator::NextFromInput() {
       has_current_user_key_ = false;
       current_user_key_sequence_ = kMaxSequenceNumber;
       current_user_key_snapshot_ = 0;
-      iter_stats_.num_input_corrupt_records++;
       valid_ = true;
       break;
     }
@@ -295,8 +314,9 @@ void CompactionIterator::NextFromInput() {
 
       // Apply the compaction filter to the first committed version of the user
       // key.
-      if (current_key_committed_) {
-        InvokeFilterIfNeeded(&need_skip, &skip_until);
+      if (current_key_committed_ &&
+          !InvokeFilterIfNeeded(&need_skip, &skip_until)) {
+        break;
       }
     } else {
       // Update the current key to reflect the new sequence number/type without
@@ -316,8 +336,9 @@ void CompactionIterator::NextFromInput() {
         current_key_committed_ = KeyCommitted(ikey_.sequence);
         // Apply the compaction filter to the first committed version of the
         // user key.
-        if (current_key_committed_) {
-          InvokeFilterIfNeeded(&need_skip, &skip_until);
+        if (current_key_committed_ &&
+            !InvokeFilterIfNeeded(&need_skip, &skip_until)) {
+          break;
         }
       }
     }

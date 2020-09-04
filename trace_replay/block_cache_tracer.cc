@@ -19,8 +19,6 @@
 namespace ROCKSDB_NAMESPACE {
 
 namespace {
-const unsigned int kCharSize = 1;
-
 bool ShouldTrace(const Slice& block_key, const TraceOptions& trace_options) {
   if (trace_options.sampling_frequency == 0 ||
       trace_options.sampling_frequency == 1) {
@@ -217,6 +215,8 @@ Status BlockCacheTraceReader::ReadAccess(BlockCacheTraceRecord* record) {
   record->block_type = trace.type;
   Slice enc_slice = Slice(trace.payload);
 
+  const unsigned int kCharSize = 1;
+
   Slice block_key;
   if (!GetLengthPrefixedSlice(&enc_slice, &block_key)) {
     return Status::Incomplete(
@@ -306,8 +306,8 @@ Status BlockCacheTraceReader::ReadAccess(BlockCacheTraceRecord* record) {
 
 BlockCacheHumanReadableTraceWriter::~BlockCacheHumanReadableTraceWriter() {
   if (human_readable_trace_file_writer_) {
-    human_readable_trace_file_writer_->Flush();
-    human_readable_trace_file_writer_->Close();
+    human_readable_trace_file_writer_->Flush().PermitUncheckedError();
+    human_readable_trace_file_writer_->Close().PermitUncheckedError();
   }
 }
 

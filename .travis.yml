@@ -224,38 +224,33 @@ install:
       PATH=$PATH:/usr/local/opt/ccache/libexec;
     fi
   - if [ "${JOB_NAME}" == cmake-gcc8 ]; then
-      sudo apt-get install -y g++-8;
+      sudo apt-get install -y g++-8 || exit $?;
       CC=gcc-8 && CXX=g++-8;
     fi
   - if [ "${JOB_NAME}" == cmake-gcc9 ] || [ "${JOB_NAME}" == cmake-gcc9-c++20 ]; then
-      sudo apt-get install -y g++-9;
+      sudo apt-get install -y g++-9 || exit $?;
       CC=gcc-9 && CXX=g++-9;
     fi
   - if [ "${JOB_NAME}" == cmake-mingw ]; then
-      sudo apt-get install -y mingw-w64 ;
+      sudo apt-get install -y mingw-w64 || exit $?;
     fi
   - if [ "${JOB_NAME}" == make-gcc4.8 ]; then
-      sudo apt-get install -y g++-4.8 ;
+      sudo apt-get install -y g++-4.8 || exit $?;
       CC=gcc-4.8 && CXX=g++-4.8;
     fi
   - if [[ "${JOB_NAME}" == cmake* ]] && [ "${TRAVIS_OS_NAME}" == linux ]; then
-      CMAKE_DIST_URL="https://rocksdb-deps.s3-us-west-2.amazonaws.com/cmake/cmake-3.14.5-Linux-$(uname -m).tar.bz2";
-      TAR_OPT="--strip-components=1 -xj";
-      if [ "aarch64" == "$(uname -m)" ]; then
-        sudo apt-get install -y libuv1 librhash0;
-        sudo apt-get upgrade -y libstdc++6;
-      fi;
-      mkdir cmake-dist && curl --silent --fail --show-error --location "${CMAKE_DIST_URL}" | tar -C cmake-dist ${TAR_OPT} && export PATH=$PWD/cmake-dist/bin:$PATH;
+      sudo apt-get install snapd && sudo snap install cmake --beta --classic || exit $?;
+      export PATH=/snap/bin:$PATH;
     fi
   - |
     if [[ "${JOB_NAME}" == java_test || "${JOB_NAME}" == cmake* ]]; then
       # Ensure JDK 8
       if [ "${TRAVIS_OS_NAME}" == osx ]; then
-        brew tap AdoptOpenJDK/openjdk
-        brew cask install adoptopenjdk8
+        brew tap AdoptOpenJDK/openjdk || exit $?
+        brew cask install adoptopenjdk8 || exit $?
         export JAVA_HOME=$(/usr/libexec/java_home)
       else
-        sudo apt-get install -y openjdk-8-jdk
+        sudo apt-get install -y openjdk-8-jdk || exit $?
         export PATH=/usr/lib/jvm/java-8-openjdk-$(dpkg --print-architecture)/bin:$PATH
         export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-$(dpkg --print-architecture)
       fi
@@ -283,7 +278,7 @@ script:
       OPT="-DTRAVIS -DROCKSDB_NAMESPACE=alternative_rocksdb_ns" V=1 make -j4 tools && OPT="-DTRAVIS -DROCKSDB_NAMESPACE=alternative_rocksdb_ns" V=1 ROCKSDBTESTS_START=db_iter_test ROCKSDBTESTS_END=options_file_test make -j4 check_some
       ;;
     3)
-      OPT=-DTRAVIS V=1 ROCKSDBTESTS_START=options_file_test ROCKSDBTESTS_END=write_prepared_transaction_test make -j4 check_some
+      OPT=-DTRAVIS LIB_MODE=shared V=1 ROCKSDBTESTS_START=options_file_test ROCKSDBTESTS_END=write_prepared_transaction_test make -j4 check_some
       ;;
     4)
       OPT=-DTRAVIS V=1 ROCKSDBTESTS_START=write_prepared_transaction_test make -j4 check_some

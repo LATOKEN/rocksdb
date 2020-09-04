@@ -5,8 +5,6 @@
 #pragma once
 #ifndef ROCKSDB_LITE
 
-#include "rocksdb/sst_dump_tool.h"
-
 #include <memory>
 #include <string>
 #include "db/dbformat.h"
@@ -19,7 +17,9 @@ class SstFileDumper {
  public:
   explicit SstFileDumper(const Options& options, const std::string& file_name,
                          size_t readahead_size, bool verify_checksum,
-                         bool output_hex, bool decode_blob_index);
+                         bool output_hex, bool decode_blob_index,
+                         const EnvOptions& soptions = EnvOptions(),
+                         bool silent = false);
 
   Status ReadSequential(bool print_kv, uint64_t read_num, bool has_from,
                         const std::string& from_key, bool has_to,
@@ -38,9 +38,9 @@ class SstFileDumper {
   int ShowAllCompressionSizes(
       size_t block_size,
       const std::vector<std::pair<CompressionType, const char*>>&
-        compression_types,
-      int32_t compress_level_from,
-      int32_t compress_level_to);
+          compression_types,
+      int32_t compress_level_from, int32_t compress_level_to,
+      uint32_t max_dict_bytes, uint32_t zstd_max_train_bytes);
 
   int ShowCompressionSize(
       size_t block_size,
@@ -74,6 +74,8 @@ class SstFileDumper {
   bool output_hex_;
   bool decode_blob_index_;
   EnvOptions soptions_;
+  // less verbose in stdout/stderr
+  bool silent_;
 
   // options_ and internal_comparator_ will also be used in
   // ReadSequential internally (specifically, seek-related operations)

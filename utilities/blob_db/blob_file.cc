@@ -61,7 +61,7 @@ std::string BlobFile::PathName() const {
   return BlobFileName(path_to_dir_, file_number_);
 }
 
-std::shared_ptr<Reader> BlobFile::OpenRandomAccessReader(
+std::shared_ptr<BlobLogReader> BlobFile::OpenRandomAccessReader(
     Env* env, const DBOptions& db_options,
     const EnvOptions& env_options) const {
   constexpr size_t kReadaheadSize = 2 * 1024 * 1024;
@@ -78,7 +78,7 @@ std::shared_ptr<Reader> BlobFile::OpenRandomAccessReader(
   sfile_reader.reset(new RandomAccessFileReader(
       NewLegacyRandomAccessFileWrapper(sfile), path_name));
 
-  std::shared_ptr<Reader> log_reader = std::make_shared<Reader>(
+  std::shared_ptr<BlobLogReader> log_reader = std::make_shared<BlobLogReader>(
       std::move(sfile_reader), db_options.env, db_options.statistics.get());
 
   return log_reader;
@@ -103,12 +103,6 @@ void BlobFile::MarkObsolete(SequenceNumber sequence) {
   obsolete_.store(true);
 }
 
-bool BlobFile::NeedsFsync(bool hard, uint64_t bytes_per_sync) const {
-  assert(last_fsync_ <= file_size_);
-  return (hard) ? file_size_ > last_fsync_
-                : (file_size_ - last_fsync_) >= bytes_per_sync;
-}
-
 Status BlobFile::WriteFooterAndCloseLocked(SequenceNumber sequence) {
   BlobLogFooter footer;
   footer.blob_count = blob_count_;
@@ -117,7 +111,8 @@ Status BlobFile::WriteFooterAndCloseLocked(SequenceNumber sequence) {
   }
 
   // this will close the file and reset the Writable File Pointer.
-  Status s = log_writer_->AppendFooter(footer);
+  Status s = log_writer_->AppendFooter(footer, /* checksum_method */ nullptr,
+                                       /* checksum_value */ nullptr);
   if (s.ok()) {
     closed_ = true;
     immutable_sequence_ = sequence;
@@ -160,8 +155,6 @@ Status BlobFile::ReadFooter(BlobLogFooter* bf) {
 }
 
 Status BlobFile::SetFromFooterLocked(const BlobLogFooter& footer) {
-  // assume that file has been fully fsync'd
-  last_fsync_.store(file_size_);
   blob_count_ = footer.blob_count;
   expiration_range_ = footer.expiration_range;
   closed_ = true;
@@ -172,7 +165,6 @@ Status BlobFile::Fsync() {
   Status s;
   if (log_writer_.get()) {
     s = log_writer_->Sync();
-    last_fsync_.store(file_size_.load());
   }
   return s;
 }

@@ -1266,8 +1266,6 @@ class DB {
   // updated, false if user attempted to call if with seqnum <= current value.
   virtual bool SetPreserveDeletesSequenceNumber(SequenceNumber seqnum) = 0;
 
-#ifndef ROCKSDB_LITE
-
   // Prevent file deletions. Compactions will continue to occur,
   // but no obsolete files will be deleted. Calling this multiple
   // times have the same effect as calling it once.
@@ -1284,6 +1282,7 @@ class DB {
   // threads call EnableFileDeletions()
   virtual Status EnableFileDeletions(bool force = true) = 0;
 
+#ifndef ROCKSDB_LITE
   // GetLiveFiles followed by GetSortedWalFiles can generate a lossless backup
 
   // Retrieve the list of all files in the database. The files are
@@ -1345,6 +1344,14 @@ class DB {
 
 // Windows API macro interference
 #undef DeleteFile
+  // WARNING: This API is planned for removal in RocksDB 7.0 since it does not
+  // operate at the proper level of abstraction for a key-value store, and its
+  // contract/restrictions are poorly documented. For example, it returns non-OK
+  // `Status` for non-bottommost files and files undergoing compaction. Since we
+  // do not plan to maintain it, the contract will likely remain underspecified
+  // until its removal. Any user is encouraged to read the implementation
+  // carefully and migrate away from it when possible.
+  //
   // Delete the file name from the db directory and update the internal state to
   // reflect that. Supports deletion of sst and log files only. 'name' must be
   // path relative to the db directory. eg. 000001.sst, /archive/000003.log
@@ -1354,6 +1361,11 @@ class DB {
   // and end key
   virtual void GetLiveFilesMetaData(
       std::vector<LiveFileMetaData>* /*metadata*/) {}
+
+  // Return a list of all table file checksum info.
+  // Note: This function might be of limited use because it cannot be
+  // synchronized with GetLiveFiles.
+  virtual Status GetLiveFilesChecksumInfo(FileChecksumList* checksum_list) = 0;
 
   // Obtains the meta data of the specified column family of the DB.
   virtual void GetColumnFamilyMetaData(ColumnFamilyHandle* /*column_family*/,
@@ -1583,6 +1595,16 @@ class DB {
 
   virtual Status EndTrace() {
     return Status::NotSupported("EndTrace() is not implemented.");
+  }
+
+  // StartIOTrace and EndIOTrace are experimental. They are not enabled yet.
+  virtual Status StartIOTrace(Env* /*env*/, const TraceOptions& /*options*/,
+                              std::unique_ptr<TraceWriter>&& /*trace_writer*/) {
+    return Status::NotSupported("StartTrace() is not implemented.");
+  }
+
+  virtual Status EndIOTrace() {
+    return Status::NotSupported("StartTrace() is not implemented.");
   }
 
   // Trace block cache accesses. Use EndBlockCacheTrace() to stop tracing.

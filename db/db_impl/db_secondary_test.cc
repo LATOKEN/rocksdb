@@ -10,8 +10,8 @@
 #include "db/db_impl/db_impl_secondary.h"
 #include "db/db_test_util.h"
 #include "port/stack_trace.h"
-#include "test_util/fault_injection_test_env.h"
 #include "test_util/sync_point.h"
+#include "utilities/fault_injection_env.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -19,7 +19,7 @@ namespace ROCKSDB_NAMESPACE {
 class DBSecondaryTest : public DBTestBase {
  public:
   DBSecondaryTest()
-      : DBTestBase("/db_secondary_test"),
+      : DBTestBase("/db_secondary_test", /*env_do_fsync=*/true),
         secondary_path_(),
         handles_secondary_(),
         db_secondary_(nullptr) {

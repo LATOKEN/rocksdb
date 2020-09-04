@@ -167,6 +167,7 @@ TEST_F(OptionsSettableTest, BlockBasedTableOptionsAllFieldsSettable) {
       "block_size_deviation=8;block_restart_interval=4; "
       "metadata_block_size=1024;"
       "partition_filters=false;"
+      "optimize_filters_for_memory=true;"
       "index_block_restart_interval=4;"
       "filter_policy=bloomfilter:4:true;whole_key_filtering=1;"
       "format_version=1;"
@@ -323,7 +324,9 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "avoid_unnecessary_blocking_io=false;"
                              "log_readahead_size=0;"
                              "write_dbid_to_manifest=false;"
-                             "best_efforts_recovery=false",
+                             "best_efforts_recovery=false;"
+                             "max_bgerror_resume_count=2;"
+                             "bgerror_resume_retry_interval=1000000",
                              new_options));
 
   ASSERT_EQ(unset_bytes_base, NumUnsetBytes(new_options_ptr, sizeof(DBOptions),
@@ -384,6 +387,8 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
       {offset_of(&ColumnFamilyOptions::cf_paths), sizeof(std::vector<DbPath>)},
       {offset_of(&ColumnFamilyOptions::compaction_thread_limiter),
        sizeof(std::shared_ptr<ConcurrentTaskLimiter>)},
+      {offset_of(&ColumnFamilyOptions::sst_partitioner_factory),
+       sizeof(std::shared_ptr<SstPartitionerFactory>)},
   };
 
   char* options_ptr = new char[sizeof(ColumnFamilyOptions)];
@@ -422,6 +427,7 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
   options->purge_redundant_kvs_while_flush = false;
   options->max_mem_compaction_level = 0;
   options->compaction_filter = nullptr;
+  options->sst_partitioner_factory = nullptr;
 
   char* new_options_ptr = new char[sizeof(ColumnFamilyOptions)];
   ColumnFamilyOptions* new_options =
@@ -484,6 +490,10 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
       "ttl=60;"
       "periodic_compaction_seconds=3600;"
       "sample_for_compression=0;"
+      "enable_blob_files=true;"
+      "min_blob_size=256;"
+      "blob_file_size=1000000;"
+      "blob_compression_type=kBZip2Compression;"
       "compaction_options_fifo={max_table_files_size=3;allow_"
       "compaction=false;};",
       new_options));

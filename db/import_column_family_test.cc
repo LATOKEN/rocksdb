@@ -1,17 +1,20 @@
 #ifndef ROCKSDB_LITE
 
 #include <functional>
+
 #include "db/db_test_util.h"
 #include "port/port.h"
 #include "port/stack_trace.h"
 #include "rocksdb/sst_file_writer.h"
 #include "test_util/testutil.h"
+#include "util/random.h"
 
 namespace ROCKSDB_NAMESPACE {
 
 class ImportColumnFamilyTest : public DBTestBase {
  public:
-  ImportColumnFamilyTest() : DBTestBase("/import_column_family_test") {
+  ImportColumnFamilyTest()
+      : DBTestBase("/import_column_family_test", /*env_do_fsync=*/true) {
     sst_files_dir_ = dbname_ + "/sst_files/";
     DestroyAndRecreateExternalSSTFilesDir();
     export_files_dir_ = test::PerThreadDBPath(env_, "export");
@@ -35,14 +38,14 @@ class ImportColumnFamilyTest : public DBTestBase {
       delete metadata_ptr_;
       metadata_ptr_ = nullptr;
     }
-    test::DestroyDir(env_, sst_files_dir_);
-    test::DestroyDir(env_, export_files_dir_);
+    DestroyDir(env_, sst_files_dir_);
+    DestroyDir(env_, export_files_dir_);
   }
 
   void DestroyAndRecreateExternalSSTFilesDir() {
-    test::DestroyDir(env_, sst_files_dir_);
+    DestroyDir(env_, sst_files_dir_);
     env_->CreateDir(sst_files_dir_);
-    test::DestroyDir(env_, export_files_dir_);
+    DestroyDir(env_, export_files_dir_);
   }
 
   LiveFileMetaData LiveFileMetaDataInit(std::string name, std::string path,
@@ -411,7 +414,7 @@ TEST_F(ImportColumnFamilyTest, ImportExportedSSTFromAnotherDB) {
 
   // Create a new db and import the files.
   DB* db_copy;
-  test::DestroyDir(env_, dbname_ + "/db_copy");
+  DestroyDir(env_, dbname_ + "/db_copy");
   ASSERT_OK(DB::Open(options, dbname_ + "/db_copy", &db_copy));
   ColumnFamilyHandle* cfh = nullptr;
   ASSERT_OK(db_copy->CreateColumnFamilyWithImport(ColumnFamilyOptions(), "yoyo",
@@ -427,7 +430,7 @@ TEST_F(ImportColumnFamilyTest, ImportExportedSSTFromAnotherDB) {
   db_copy->DropColumnFamily(cfh);
   db_copy->DestroyColumnFamilyHandle(cfh);
   delete db_copy;
-  test::DestroyDir(env_, dbname_ + "/db_copy");
+  DestroyDir(env_, dbname_ + "/db_copy");
 }
 
 TEST_F(ImportColumnFamilyTest, LevelFilesOverlappingAtEndpoints) {
@@ -450,7 +453,7 @@ TEST_F(ImportColumnFamilyTest, LevelFilesOverlappingAtEndpoints) {
   snapshots.reserve(kFileBytes / kValueBytes * kNumFiles);
   for (int i = 0; i < kNumFiles; ++i) {
     for (int j = 0; j < kFileBytes / kValueBytes; ++j) {
-      auto value = RandomString(&rnd, kValueBytes);
+      auto value = rnd.RandomString(kValueBytes);
       ASSERT_OK(Put(1, "key", value));
       snapshots.push_back(db_->GetSnapshot());
     }
@@ -471,7 +474,7 @@ TEST_F(ImportColumnFamilyTest, LevelFilesOverlappingAtEndpoints) {
 
   // Create a new db and import the files.
   DB* db_copy;
-  test::DestroyDir(env_, dbname_ + "/db_copy");
+  DestroyDir(env_, dbname_ + "/db_copy");
   ASSERT_OK(DB::Open(options, dbname_ + "/db_copy", &db_copy));
   ColumnFamilyHandle* cfh = nullptr;
   ASSERT_OK(db_copy->CreateColumnFamilyWithImport(ColumnFamilyOptions(), "yoyo",
@@ -486,7 +489,7 @@ TEST_F(ImportColumnFamilyTest, LevelFilesOverlappingAtEndpoints) {
   db_copy->DropColumnFamily(cfh);
   db_copy->DestroyColumnFamilyHandle(cfh);
   delete db_copy;
-  test::DestroyDir(env_, dbname_ + "/db_copy");
+  DestroyDir(env_, dbname_ + "/db_copy");
   for (const Snapshot* snapshot : snapshots) {
     db_->ReleaseSnapshot(snapshot);
   }
