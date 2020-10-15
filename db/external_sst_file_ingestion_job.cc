@@ -601,7 +601,7 @@ Status ExternalSstFileIngestionJob::GetIngestedFileInfo(
   bool bounds_set = false;
   iter->SeekToFirst();
   if (iter->Valid()) {
-    if (!ParseInternalKey(iter->key(), &key)) {
+    if (ParseInternalKey(iter->key(), &key) != Status::OK()) {
       return Status::Corruption("external file have corrupted keys");
     }
     if (key.sequence != 0) {
@@ -610,7 +610,7 @@ Status ExternalSstFileIngestionJob::GetIngestedFileInfo(
     file_to_ingest->smallest_internal_key.SetFrom(key);
 
     iter->SeekToLast();
-    if (!ParseInternalKey(iter->key(), &key)) {
+    if (ParseInternalKey(iter->key(), &key) != Status::OK()) {
       return Status::Corruption("external file have corrupted keys");
     }
     if (key.sequence != 0) {
@@ -627,7 +627,7 @@ Status ExternalSstFileIngestionJob::GetIngestedFileInfo(
   if (range_del_iter != nullptr) {
     for (range_del_iter->SeekToFirst(); range_del_iter->Valid();
          range_del_iter->Next()) {
-      if (!ParseInternalKey(range_del_iter->key(), &key)) {
+      if (ParseInternalKey(range_del_iter->key(), &key) != Status::OK()) {
         return Status::Corruption("external file have corrupted keys");
       }
       RangeTombstone tombstone(key, range_del_iter->value());
@@ -791,13 +791,14 @@ Status ExternalSstFileIngestionJob::AssignGlobalSeqnoForIngestedFile(
         fs_->NewRandomRWFile(file_to_ingest->internal_file_path, env_options_,
                              &rwfile, nullptr);
     if (status.ok()) {
+      FSRandomRWFilePtr fsptr(std::move(rwfile), io_tracer_);
       std::string seqno_val;
       PutFixed64(&seqno_val, seqno);
-      status = rwfile->Write(file_to_ingest->global_seqno_offset, seqno_val,
-                             IOOptions(), nullptr);
+      status = fsptr->Write(file_to_ingest->global_seqno_offset, seqno_val,
+                            IOOptions(), nullptr);
       if (status.ok()) {
         TEST_SYNC_POINT("ExternalSstFileIngestionJob::BeforeSyncGlobalSeqno");
-        status = SyncIngestedFile(rwfile.get());
+        status = SyncIngestedFile(fsptr.get());
         TEST_SYNC_POINT("ExternalSstFileIngestionJob::AfterSyncGlobalSeqno");
         if (!status.ok()) {
           ROCKS_LOG_WARN(db_options_.info_log,

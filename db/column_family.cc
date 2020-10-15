@@ -32,7 +32,7 @@
 #include "monitoring/thread_status_util.h"
 #include "options/options_helper.h"
 #include "port/port.h"
-#include "table/block_based/block_based_table_factory.h"
+#include "rocksdb/table.h"
 #include "table/merging_iterator.h"
 #include "util/autovector.h"
 #include "util/cast_util.h"
@@ -357,8 +357,8 @@ ColumnFamilyOptions SanitizeOptions(const ImmutableDBOptions& db_options,
     result.max_compaction_bytes = result.target_file_size_base * 25;
   }
 
-  bool is_block_based_table =
-      (result.table_factory->Name() == BlockBasedTableFactory::kName);
+  bool is_block_based_table = (result.table_factory->IsInstanceOf(
+      TableFactory::kBlockBasedTableName()));
 
   const uint64_t kAdjustedTtl = 30 * 24 * 60 * 60;
   if (result.ttl == kDefaultTtl) {
@@ -1102,10 +1102,12 @@ Status ColumnFamilyData::RangesOverlapWithMemtables(
       super_version->mem->NewRangeTombstoneIterator(read_opts, read_seq);
   range_del_agg.AddTombstones(
       std::unique_ptr<FragmentedRangeTombstoneIterator>(active_range_del_iter));
-  super_version->imm->AddRangeTombstoneIterators(read_opts, nullptr /* arena */,
-                                                 &range_del_agg);
-
   Status status;
+  status = super_version->imm->AddRangeTombstoneIterators(
+      read_opts, nullptr /* arena */, &range_del_agg);
+  // AddRangeTombstoneIterators always return Status::OK.
+  assert(status.ok());
+
   for (size_t i = 0; i < ranges.size() && status.ok() && !*overlap; ++i) {
     auto* vstorage = super_version->current->storage_info();
     auto* ucmp = vstorage->InternalComparator()->user_comparator();
@@ -1116,7 +1118,8 @@ Status ColumnFamilyData::RangesOverlapWithMemtables(
     ParsedInternalKey seek_result;
     if (status.ok()) {
       if (memtable_iter->Valid() &&
-          !ParseInternalKey(memtable_iter->key(), &seek_result)) {
+          ParseInternalKey(memtable_iter->key(), &seek_result) !=
+              Status::OK()) {
         status = Status::Corruption("DB have corrupted keys");
       }
     }
@@ -1316,7 +1319,8 @@ Status ColumnFamilyData::ValidateOptions(
   }
 
   if (cf_options.ttl > 0 && cf_options.ttl != kDefaultTtl) {
-    if (cf_options.table_factory->Name() != BlockBasedTableFactory::kName) {
+    if (!cf_options.table_factory->IsInstanceOf(
+            TableFactory::kBlockBasedTableName())) {
       return Status::NotSupported(
           "TTL is only supported in Block-Based Table format. ");
     }
@@ -1324,7 +1328,8 @@ Status ColumnFamilyData::ValidateOptions(
 
   if (cf_options.periodic_compaction_seconds > 0 &&
       cf_options.periodic_compaction_seconds != kDefaultPeriodicCompSecs) {
-    if (cf_options.table_factory->Name() != BlockBasedTableFactory::kName) {
+    if (!cf_options.table_factory->IsInstanceOf(
+            TableFactory::kBlockBasedTableName())) {
       return Status::NotSupported(
           "Periodic Compaction is only supported in "
           "Block-Based Table format. ");

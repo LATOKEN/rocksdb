@@ -24,9 +24,34 @@ class FileSystemTracingWrapper : public FileSystemWrapper {
 
   ~FileSystemTracingWrapper() override {}
 
+  IOStatus NewSequentialFile(const std::string& fname,
+                             const FileOptions& file_opts,
+                             std::unique_ptr<FSSequentialFile>* result,
+                             IODebugContext* dbg) override;
+
+  IOStatus NewRandomAccessFile(const std::string& fname,
+                               const FileOptions& file_opts,
+                               std::unique_ptr<FSRandomAccessFile>* result,
+                               IODebugContext* dbg) override;
+
   IOStatus NewWritableFile(const std::string& fname,
                            const FileOptions& file_opts,
                            std::unique_ptr<FSWritableFile>* result,
+                           IODebugContext* dbg) override;
+
+  IOStatus ReopenWritableFile(const std::string& fname,
+                              const FileOptions& file_opts,
+                              std::unique_ptr<FSWritableFile>* result,
+                              IODebugContext* dbg) override;
+
+  IOStatus ReuseWritableFile(const std::string& fname,
+                             const std::string& old_fname,
+                             const FileOptions& file_opts,
+                             std::unique_ptr<FSWritableFile>* result,
+                             IODebugContext* dbg) override;
+
+  IOStatus NewRandomRWFile(const std::string& fname, const FileOptions& options,
+                           std::unique_ptr<FSRandomRWFile>* result,
                            IODebugContext* dbg) override;
 
   IOStatus NewDirectory(const std::string& name, const IOOptions& io_opts,
@@ -52,6 +77,9 @@ class FileSystemTracingWrapper : public FileSystemWrapper {
 
   IOStatus GetFileSize(const std::string& fname, const IOOptions& options,
                        uint64_t* file_size, IODebugContext* dbg) override;
+
+  IOStatus Truncate(const std::string& fname, size_t size,
+                    const IOOptions& options, IODebugContext* dbg) override;
 
  private:
   std::shared_ptr<IOTracer> io_tracer_;
@@ -244,10 +272,21 @@ class FSWritableFileTracingWrapper : public FSWritableFileWrapper {
 
   IOStatus Append(const Slice& data, const IOOptions& options,
                   IODebugContext* dbg) override;
+  IOStatus Append(const Slice& data, const IOOptions& options,
+                  const DataVerificationInfo& /*verification_info*/,
+                  IODebugContext* dbg) override {
+    return Append(data, options, dbg);
+  }
 
   IOStatus PositionedAppend(const Slice& data, uint64_t offset,
                             const IOOptions& options,
                             IODebugContext* dbg) override;
+  IOStatus PositionedAppend(const Slice& data, uint64_t offset,
+                            const IOOptions& options,
+                            const DataVerificationInfo& /*verification_info*/,
+                            IODebugContext* dbg) override {
+    return PositionedAppend(data, offset, options, dbg);
+  }
 
   IOStatus Truncate(uint64_t size, const IOOptions& options,
                     IODebugContext* dbg) override;
@@ -270,26 +309,38 @@ class FSWritableFileTracingWrapper : public FSWritableFileWrapper {
 // FSWritableFileTracingWrapper when tracing is disabled.
 class FSWritableFilePtr {
  public:
-  FSWritableFilePtr(FSWritableFile* fs, std::shared_ptr<IOTracer> io_tracer)
-      : fs_(fs),
-        io_tracer_(io_tracer),
-        fs_tracer_(new FSWritableFileTracingWrapper(fs_, io_tracer_)) {}
-
-  explicit FSWritableFilePtr(FSWritableFile* fs)
-      : fs_(fs), io_tracer_(nullptr), fs_tracer_(nullptr) {}
+  FSWritableFilePtr(std::unique_ptr<FSWritableFile>&& fs,
+                    const std::shared_ptr<IOTracer>& io_tracer)
+      : fs_(std::move(fs)), io_tracer_(io_tracer) {
+    fs_tracer_.reset(new FSWritableFileTracingWrapper(fs_.get(), io_tracer_));
+  }
 
   FSWritableFile* operator->() const {
     if (io_tracer_ && io_tracer_->is_tracing_enabled()) {
-      return fs_tracer_;
+      return fs_tracer_.get();
     } else {
-      return fs_;
+      return fs_.get();
     }
   }
 
+  FSWritableFile* get() const {
+    if (io_tracer_ && io_tracer_->is_tracing_enabled()) {
+      return fs_tracer_.get();
+    } else {
+      return fs_.get();
+    }
+  }
+
+  void reset() {
+    fs_.reset();
+    fs_tracer_.reset();
+    io_tracer_ = nullptr;
+  }
+
  private:
-  FSWritableFile* fs_;
+  std::unique_ptr<FSWritableFile> fs_;
   std::shared_ptr<IOTracer> io_tracer_;
-  FSWritableFileTracingWrapper* fs_tracer_;
+  std::unique_ptr<FSWritableFileTracingWrapper> fs_tracer_;
 };
 
 // FSRandomRWFileTracingWrapper is a wrapper class above FSRandomRWFile that
@@ -313,6 +364,14 @@ class FSRandomRWFileTracingWrapper : public FSRandomRWFileWrapper {
                 Slice* result, char* scratch,
                 IODebugContext* dbg) const override;
 
+  IOStatus Flush(const IOOptions& options, IODebugContext* dbg) override;
+
+  IOStatus Close(const IOOptions& options, IODebugContext* dbg) override;
+
+  IOStatus Sync(const IOOptions& options, IODebugContext* dbg) override;
+
+  IOStatus Fsync(const IOOptions& options, IODebugContext* dbg) override;
+
  private:
   std::shared_ptr<IOTracer> io_tracer_;
   Env* env_;
@@ -325,26 +384,32 @@ class FSRandomRWFileTracingWrapper : public FSRandomRWFileWrapper {
 // FSRandomRWFileTracingWrapper when tracing is disabled.
 class FSRandomRWFilePtr {
  public:
-  FSRandomRWFilePtr(FSRandomRWFile* fs, std::shared_ptr<IOTracer> io_tracer)
-      : fs_(fs),
+  FSRandomRWFilePtr(std::unique_ptr<FSRandomRWFile>&& fs,
+                    std::shared_ptr<IOTracer> io_tracer)
+      : fs_(std::move(fs)),
         io_tracer_(io_tracer),
-        fs_tracer_(new FSRandomRWFileTracingWrapper(fs_, io_tracer_)) {}
-
-  explicit FSRandomRWFilePtr(FSRandomRWFile* fs)
-      : fs_(fs), io_tracer_(nullptr), fs_tracer_(nullptr) {}
+        fs_tracer_(fs_.get(), io_tracer_) {}
 
   FSRandomRWFile* operator->() const {
     if (io_tracer_ && io_tracer_->is_tracing_enabled()) {
-      return fs_tracer_;
+      return const_cast<FSRandomRWFileTracingWrapper*>(&fs_tracer_);
     } else {
-      return fs_;
+      return fs_.get();
+    }
+  }
+
+  FSRandomRWFile* get() const {
+    if (io_tracer_ && io_tracer_->is_tracing_enabled()) {
+      return const_cast<FSRandomRWFileTracingWrapper*>(&fs_tracer_);
+    } else {
+      return fs_.get();
     }
   }
 
  private:
-  FSRandomRWFile* fs_;
+  std::unique_ptr<FSRandomRWFile> fs_;
   std::shared_ptr<IOTracer> io_tracer_;
-  FSRandomRWFileTracingWrapper* fs_tracer_;
+  FSRandomRWFileTracingWrapper fs_tracer_;
 };
 
 }  // namespace ROCKSDB_NAMESPACE

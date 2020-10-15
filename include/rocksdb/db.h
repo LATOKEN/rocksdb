@@ -157,7 +157,7 @@ class DB {
   // return Status::NotSupported.
   static Status OpenForReadOnly(const Options& options, const std::string& name,
                                 DB** dbptr,
-                                bool error_if_log_file_exist = false);
+                                bool error_if_wal_file_exists = false);
 
   // Open the database for read only with column families. When opening DB with
   // read only, you can specify only a subset of column families in the
@@ -171,7 +171,7 @@ class DB {
       const DBOptions& db_options, const std::string& name,
       const std::vector<ColumnFamilyDescriptor>& column_families,
       std::vector<ColumnFamilyHandle*>* handles, DB** dbptr,
-      bool error_if_log_file_exist = false);
+      bool error_if_wal_file_exists = false);
 
   // The following OpenAsSecondary functions create a secondary instance that
   // can dynamically tail the MANIFEST of a primary that must have already been
@@ -1597,14 +1597,14 @@ class DB {
     return Status::NotSupported("EndTrace() is not implemented.");
   }
 
-  // StartIOTrace and EndIOTrace are experimental. They are not enabled yet.
+  // IO Tracing operations. Use EndIOTrace() to stop tracing.
   virtual Status StartIOTrace(Env* /*env*/, const TraceOptions& /*options*/,
                               std::unique_ptr<TraceWriter>&& /*trace_writer*/) {
-    return Status::NotSupported("StartTrace() is not implemented.");
+    return Status::NotSupported("StartIOTrace() is not implemented.");
   }
 
   virtual Status EndIOTrace() {
-    return Status::NotSupported("StartTrace() is not implemented.");
+    return Status::NotSupported("EndIOTrace() is not implemented.");
   }
 
   // Trace block cache accesses. Use EndBlockCacheTrace() to stop tracing.
