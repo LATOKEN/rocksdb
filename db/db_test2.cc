@@ -2967,11 +2967,11 @@ TEST_F(DBTest2, OptimizeForSmallDB) {
   options.OptimizeForSmallDb();
 
   // Find the cache object
-  ASSERT_EQ(std::string(BlockBasedTableFactory::kName),
-            std::string(options.table_factory->Name()));
-  BlockBasedTableOptions* table_options =
-      reinterpret_cast<BlockBasedTableOptions*>(
-          options.table_factory->GetOptions());
+  ASSERT_TRUE(options.table_factory->IsInstanceOf(
+      TableFactory::kBlockBasedTableName()));
+  auto table_options =
+      options.table_factory->GetOptions<BlockBasedTableOptions>();
+
   ASSERT_TRUE(table_options != nullptr);
   std::shared_ptr<Cache> cache = table_options->block_cache;
 
@@ -4376,8 +4376,8 @@ class DummyOldStats : public Statistics {
   }
   bool HistEnabledForType(uint32_t /*type*/) const override { return false; }
   std::string ToString() const override { return ""; }
-  int num_rt = 0;
-  int num_mt = 0;
+  std::atomic<int> num_rt{0};
+  std::atomic<int> num_mt{0};
 };
 }  // namespace
 

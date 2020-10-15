@@ -55,9 +55,7 @@
 #include "rocksdb/utilities/checkpoint.h"
 #include "rocksdb/utilities/optimistic_transaction_db.h"
 #include "rocksdb/utilities/write_batch_with_index.h"
-#include "table/block_based/block_based_table_factory.h"
 #include "table/mock_table.h"
-#include "table/plain/plain_table_factory.h"
 #include "table/scoped_arena_iterator.h"
 #include "test_util/sync_point.h"
 #include "test_util/testharness.h"
@@ -3842,7 +3840,7 @@ TEST_F(DBTest, TableOptionsSanitizeTest) {
   DestroyAndReopen(options);
   ASSERT_EQ(db_->GetOptions().allow_mmap_reads, false);
 
-  options.table_factory.reset(new PlainTableFactory());
+  options.table_factory.reset(NewPlainTableFactory());
   options.prefix_extractor.reset(NewNoopTransform());
   Destroy(options);
   ASSERT_TRUE(!TryReopen(options).IsNotSupported());
@@ -5158,12 +5156,13 @@ TEST_F(DBTest, FileCreationRandomFailure) {
   DestroyAndReopen(options);
   Random rnd(301);
 
-  const int kCDTKeysPerBuffer = 4;
-  const int kTestSize = kCDTKeysPerBuffer * 4096;
-  const int kTotalIteration = 100;
+  constexpr int kCDTKeysPerBuffer = 4;
+  constexpr int kTestSize = kCDTKeysPerBuffer * 4096;
+  constexpr int kTotalIteration = 20;
   // the second half of the test involves in random failure
   // of file creation.
-  const int kRandomFailureTest = kTotalIteration / 2;
+  constexpr int kRandomFailureTest = kTotalIteration / 2;
+
   std::vector<std::string> values;
   for (int i = 0; i < kTestSize; ++i) {
     values.push_back("NOT_FOUND");
@@ -5293,6 +5292,13 @@ TEST_F(DBTest, DynamicMiscOptions) {
   ASSERT_OK(dbfull()->TEST_GetLatestMutableCFOptions(handles_[1],
                                                      &mutable_cf_options));
   ASSERT_TRUE(mutable_cf_options.report_bg_io_stats);
+  ASSERT_TRUE(mutable_cf_options.check_flush_compaction_key_order);
+
+  ASSERT_OK(dbfull()->SetOptions(
+      handles_[1], {{"check_flush_compaction_key_order", "false"}}));
+  ASSERT_OK(dbfull()->TEST_GetLatestMutableCFOptions(handles_[1],
+                                                     &mutable_cf_options));
+  ASSERT_FALSE(mutable_cf_options.check_flush_compaction_key_order);
 }
 #endif  // ROCKSDB_LITE
 

@@ -38,9 +38,7 @@
 #include "rocksdb/statistics.h"
 #include "rocksdb/table.h"
 #include "rocksdb/utilities/checkpoint.h"
-#include "table/block_based/block_based_table_factory.h"
 #include "table/mock_table.h"
-#include "table/plain/plain_table_factory.h"
 #include "table/scoped_arena_iterator.h"
 #include "test_util/mock_time_env.h"
 #include "test_util/sync_point.h"
@@ -1147,8 +1145,8 @@ class DBTestBase : public testing::Test {
   void CopyFile(const std::string& source, const std::string& destination,
                 uint64_t size = 0);
 
-  std::unordered_map<std::string, uint64_t> GetAllSSTFiles(
-      uint64_t* total_size = nullptr);
+  Status GetAllSSTFiles(std::unordered_map<std::string, uint64_t>* sst_files,
+                        uint64_t* total_size = nullptr);
 
   std::vector<std::uint64_t> ListTableFiles(Env* env, const std::string& path);
 
