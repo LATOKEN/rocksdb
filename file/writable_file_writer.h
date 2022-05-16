@@ -10,9 +10,10 @@
 #pragma once
 #include <atomic>
 #include <string>
+
 #include "db/version_edit.h"
+#include "env/file_system_tracer.h"
 #include "port/port.h"
-#include "rocksdb/env.h"
 #include "rocksdb/file_checksum.h"
 #include "rocksdb/file_system.h"
 #include "rocksdb/io_status.h"
@@ -23,6 +24,7 @@
 
 namespace ROCKSDB_NAMESPACE {
 class Statistics;
+class SystemClock;
 
 // WritableFileWriter is a wrapper on top of Env::WritableFile. It provides
 // facilities to:
@@ -40,7 +42,7 @@ class WritableFileWriter {
       const FileOperationInfo::FinishTimePoint& finish_ts,
       const IOStatus& io_status) {
     FileOperationInfo info(FileOperationType::kWrite, file_name_, start_ts,
-                           finish_ts, io_status);
+                           finish_ts, io_status, temperature_);
     info.offset = offset;
     info.length = length;
 
@@ -54,7 +56,7 @@ class WritableFileWriter {
       const FileOperationInfo::FinishTimePoint& finish_ts,
       const IOStatus& io_status) {
     FileOperationInfo info(FileOperationType::kFlush, file_name_, start_ts,
-                           finish_ts, io_status);
+                           finish_ts, io_status, temperature_);
 
     for (auto& listener : listeners_) {
       listener->OnFileFlushFinish(info);
@@ -66,7 +68,8 @@ class WritableFileWriter {
       const FileOperationInfo::FinishTimePoint& finish_ts,
       const IOStatus& io_status,
       FileOperationType type = FileOperationType::kSync) {
-    FileOperationInfo info(type, file_name_, start_ts, finish_ts, io_status);
+    FileOperationInfo info(type, file_name_, start_ts, finish_ts, io_status,
+                           temperature_);
 
     for (auto& listener : listeners_) {
       listener->OnFileSyncFinish(info);
@@ -79,7 +82,7 @@ class WritableFileWriter {
       const FileOperationInfo::FinishTimePoint& finish_ts,
       const IOStatus& io_status) {
     FileOperationInfo info(FileOperationType::kRangeSync, file_name_, start_ts,
-                           finish_ts, io_status);
+                           finish_ts, io_status, temperature_);
     info.offset = offset;
     info.length = length;
 
@@ -93,7 +96,7 @@ class WritableFileWriter {
       const FileOperationInfo::FinishTimePoint& finish_ts,
       const IOStatus& io_status) {
     FileOperationInfo info(FileOperationType::kTruncate, file_name_, start_ts,
-                           finish_ts, io_status);
+                           finish_ts, io_status, temperature_);
 
     for (auto& listener : listeners_) {
       listener->OnFileTruncateFinish(info);
@@ -105,21 +108,36 @@ class WritableFileWriter {
       const FileOperationInfo::FinishTimePoint& finish_ts,
       const IOStatus& io_status) {
     FileOperationInfo info(FileOperationType::kClose, file_name_, start_ts,
-                           finish_ts, io_status);
+                           finish_ts, io_status, temperature_);
 
     for (auto& listener : listeners_) {
       listener->OnFileCloseFinish(info);
     }
     info.status.PermitUncheckedError();
   }
+
+  void NotifyOnIOError(const IOStatus& io_status, FileOperationType operation,
+                       const std::string& file_path, size_t length = 0,
+                       uint64_t offset = 0) {
+    if (listeners_.empty()) {
+      return;
+    }
+    IOErrorInfo io_error_info(io_status, operation, file_path, length, offset);
+    for (auto& listener : listeners_) {
+      listener->OnIOError(io_error_info);
+    }
+    io_error_info.io_status.PermitUncheckedError();
+  }
 #endif  // ROCKSDB_LITE
 
   bool ShouldNotifyListeners() const { return !listeners_.empty(); }
   void UpdateFileChecksum(const Slice& data);
+  void Crc32cHandoffChecksumCalculation(const char* data, size_t size,
+                                        char* buf);
 
-  std::unique_ptr<FSWritableFile> writable_file_;
   std::string file_name_;
-  Env* env_;
+  FSWritableFilePtr writable_file_;
+  SystemClock* clock_;
   AlignedBuffer buf_;
   size_t max_buffer_size_;
   // Actually written data size can be used for truncate
@@ -139,17 +157,24 @@ class WritableFileWriter {
   std::vector<std::shared_ptr<EventListener>> listeners_;
   std::unique_ptr<FileChecksumGenerator> checksum_generator_;
   bool checksum_finalized_;
+  bool perform_data_verification_;
+  uint32_t buffered_data_crc32c_checksum_;
+  bool buffered_data_with_checksum_;
+  Temperature temperature_;
 
  public:
   WritableFileWriter(
       std::unique_ptr<FSWritableFile>&& file, const std::string& _file_name,
-      const FileOptions& options, Env* env = nullptr,
+      const FileOptions& options, SystemClock* clock = nullptr,
+      const std::shared_ptr<IOTracer>& io_tracer = nullptr,
       Statistics* stats = nullptr,
       const std::vector<std::shared_ptr<EventListener>>& listeners = {},
-      FileChecksumGenFactory* file_checksum_gen_factory = nullptr)
-      : writable_file_(std::move(file)),
-        file_name_(_file_name),
-        env_(env),
+      FileChecksumGenFactory* file_checksum_gen_factory = nullptr,
+      bool perform_data_verification = false,
+      bool buffered_data_with_checksum = false)
+      : file_name_(_file_name),
+        writable_file_(std::move(file), io_tracer, _file_name),
+        clock_(clock),
         buf_(),
         max_buffer_size_(options.writable_file_max_buffer_size),
         filesize_(0),
@@ -163,7 +188,12 @@ class WritableFileWriter {
         stats_(stats),
         listeners_(),
         checksum_generator_(nullptr),
-        checksum_finalized_(false) {
+        checksum_finalized_(false),
+        perform_data_verification_(perform_data_verification),
+        buffered_data_crc32c_checksum_(0),
+        buffered_data_with_checksum_(buffered_data_with_checksum),
+        temperature_(options.temperature) {
+    assert(!use_direct_io() || max_buffer_size_ > 0);
     TEST_SYNC_POINT_CALLBACK("WritableFileWriter::WritableFileWriter:0",
                              reinterpret_cast<void*>(max_buffer_size_));
     buf_.Alignment(writable_file_->GetRequiredBufferAlignment());
@@ -187,6 +217,10 @@ class WritableFileWriter {
     }
   }
 
+  static IOStatus Create(const std::shared_ptr<FileSystem>& fs,
+                         const std::string& fname, const FileOptions& file_opts,
+                         std::unique_ptr<WritableFileWriter>* writer,
+                         IODebugContext* dbg);
   WritableFileWriter(const WritableFileWriter&) = delete;
 
   WritableFileWriter& operator=(const WritableFileWriter&) = delete;
@@ -198,11 +232,15 @@ class WritableFileWriter {
 
   std::string file_name() const { return file_name_; }
 
-  IOStatus Append(const Slice& data);
+  // When this Append API is called, if the crc32c_checksum is not provided, we
+  // will calculate the checksum internally.
+  IOStatus Append(const Slice& data, uint32_t crc32c_checksum = 0,
+                  Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
-  IOStatus Pad(const size_t pad_bytes);
+  IOStatus Pad(const size_t pad_bytes,
+               Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
-  IOStatus Flush();
+  IOStatus Flush(Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
   IOStatus Close();
 
@@ -235,13 +273,21 @@ class WritableFileWriter {
   const char* GetFileChecksumFuncName() const;
 
  private:
+  static Env::IOPriority DecideRateLimiterPriority(
+      Env::IOPriority writable_file_io_priority,
+      Env::IOPriority op_rate_limiter_priority);
+
   // Used when os buffering is OFF and we are writing
   // DMA such as in Direct I/O mode
 #ifndef ROCKSDB_LITE
-  IOStatus WriteDirect();
+  IOStatus WriteDirect(Env::IOPriority op_rate_limiter_priority);
+  IOStatus WriteDirectWithChecksum(Env::IOPriority op_rate_limiter_priority);
 #endif  // !ROCKSDB_LITE
-  // Normal write
-  IOStatus WriteBuffered(const char* data, size_t size);
+  // Normal write.
+  IOStatus WriteBuffered(const char* data, size_t size,
+                         Env::IOPriority op_rate_limiter_priority);
+  IOStatus WriteBufferedWithChecksum(const char* data, size_t size,
+                                     Env::IOPriority op_rate_limiter_priority);
   IOStatus RangeSync(uint64_t offset, uint64_t nbytes);
   IOStatus SyncInternal(bool use_fsync);
 };

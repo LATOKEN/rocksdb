@@ -49,6 +49,7 @@
 #include <zstd.h>
 #if ZSTD_VERSION_NUMBER >= 10103  // v1.1.3+
 #include <zdict.h>
+#define ZSTD_STREAMING
 #endif  // ZSTD_VERSION_NUMBER >= 10103
 namespace ROCKSDB_NAMESPACE {
 // Need this for the context allocation override
@@ -514,6 +515,26 @@ inline bool ZSTDNotFinal_Supported() {
 #endif
 }
 
+inline bool ZSTD_Streaming_Supported() {
+#ifdef ZSTD
+  return ZSTD_versionNumber() >= 10300;
+#else
+  return false;
+#endif
+}
+
+inline bool StreamingCompressionTypeSupported(
+    CompressionType compression_type) {
+  switch (compression_type) {
+    case kNoCompression:
+      return true;
+    case kZSTD:
+      return ZSTD_Streaming_Supported();
+    default:
+      return false;
+  }
+}
+
 inline bool CompressionTypeSupported(CompressionType compression_type) {
   switch (compression_type) {
     case kNoCompression:
@@ -534,6 +555,43 @@ inline bool CompressionTypeSupported(CompressionType compression_type) {
       return ZSTDNotFinal_Supported();
     case kZSTD:
       return ZSTD_Supported();
+    default:
+      assert(false);
+      return false;
+  }
+}
+
+inline bool DictCompressionTypeSupported(CompressionType compression_type) {
+  switch (compression_type) {
+    case kNoCompression:
+      return false;
+    case kSnappyCompression:
+      return false;
+    case kZlibCompression:
+      return Zlib_Supported();
+    case kBZip2Compression:
+      return false;
+    case kLZ4Compression:
+    case kLZ4HCCompression:
+#if LZ4_VERSION_NUMBER >= 10400  // r124+
+      return LZ4_Supported();
+#else
+      return false;
+#endif
+    case kXpressCompression:
+      return false;
+    case kZSTDNotFinalCompression:
+#if ZSTD_VERSION_NUMBER >= 500  // v0.5.0+
+      return ZSTDNotFinal_Supported();
+#else
+      return false;
+#endif
+    case kZSTD:
+#if ZSTD_VERSION_NUMBER >= 500  // v0.5.0+
+      return ZSTD_Supported();
+#else
+      return false;
+#endif
     default:
       assert(false);
       return false;
@@ -590,6 +648,9 @@ inline std::string CompressionOptionsToString(
   result.append("enabled=")
       .append(ToString(compression_options.enabled))
       .append("; ");
+  result.append("max_dict_buffer_bytes=")
+      .append(ToString(compression_options.max_dict_buffer_bytes))
+      .append("; ");
   return result;
 }
 
@@ -616,26 +677,30 @@ inline bool Snappy_Compress(const CompressionInfo& /*info*/, const char* input,
 #endif
 }
 
-inline bool Snappy_GetUncompressedLength(const char* input, size_t length,
-                                         size_t* result) {
+inline CacheAllocationPtr Snappy_Uncompress(
+    const char* input, size_t length, size_t* uncompressed_size,
+    MemoryAllocator* allocator = nullptr) {
 #ifdef SNAPPY
-  return snappy::GetUncompressedLength(input, length, result);
-#else
-  (void)input;
-  (void)length;
-  (void)result;
-  return false;
-#endif
-}
+  size_t uncompressed_length = 0;
+  if (!snappy::GetUncompressedLength(input, length, &uncompressed_length)) {
+    return nullptr;
+  }
 
-inline bool Snappy_Uncompress(const char* input, size_t length, char* output) {
-#ifdef SNAPPY
-  return snappy::RawUncompress(input, length, output);
+  CacheAllocationPtr output = AllocateBlock(uncompressed_length, allocator);
+
+  if (!snappy::RawUncompress(input, length, output.get())) {
+    return nullptr;
+  }
+
+  *uncompressed_size = uncompressed_length;
+
+  return output;
 #else
   (void)input;
   (void)length;
-  (void)output;
-  return false;
+  (void)uncompressed_size;
+  (void)allocator;
+  return nullptr;
 #endif
 }
 
@@ -680,9 +745,6 @@ inline bool Zlib_Compress(const CompressionInfo& info,
     output_header_len = compression::PutDecompressedSizeInfo(
         output, static_cast<uint32_t>(length));
   }
-  // Resize output to be the plain data length.
-  // This may not be big enough if the compression actually expands data.
-  output->resize(output_header_len + length);
 
   // The memLevel parameter specifies how much memory should be allocated for
   // the internal compression state.
@@ -716,12 +778,17 @@ inline bool Zlib_Compress(const CompressionInfo& info,
     }
   }
 
+  // Get an upper bound on the compressed size.
+  size_t upper_bound =
+      deflateBound(&_stream, static_cast<unsigned long>(length));
+  output->resize(output_header_len + upper_bound);
+
   // Compress the input, and put compressed data in output.
   _stream.next_in = (Bytef*)input;
   _stream.avail_in = static_cast<unsigned int>(length);
 
   // Initialize the output size.
-  _stream.avail_out = static_cast<unsigned int>(length);
+  _stream.avail_out = static_cast<unsigned int>(upper_bound);
   _stream.next_out = reinterpret_cast<Bytef*>(&(*output)[output_header_len]);
 
   bool compressed = false;
@@ -754,7 +821,7 @@ inline bool Zlib_Compress(const CompressionInfo& info,
 //    dictionary.
 inline CacheAllocationPtr Zlib_Uncompress(
     const UncompressionInfo& info, const char* input_data, size_t input_length,
-    int* decompress_size, uint32_t compress_format_version,
+    size_t* uncompressed_size, uint32_t compress_format_version,
     MemoryAllocator* allocator = nullptr, int windowBits = -14) {
 #ifdef ZLIB
   uint32_t output_len = 0;
@@ -836,14 +903,15 @@ inline CacheAllocationPtr Zlib_Uncompress(
 
   // If we encoded decompressed block size, we should have no bytes left
   assert(compress_format_version != 2 || _stream.avail_out == 0);
-  *decompress_size = static_cast<int>(output_len - _stream.avail_out);
+  assert(output_len >= _stream.avail_out);
+  *uncompressed_size = output_len - _stream.avail_out;
   inflateEnd(&_stream);
   return output;
 #else
   (void)info;
   (void)input_data;
   (void)input_length;
-  (void)decompress_size;
+  (void)uncompressed_size;
   (void)compress_format_version;
   (void)allocator;
   (void)windowBits;
@@ -917,7 +985,7 @@ inline bool BZip2_Compress(const CompressionInfo& /*info*/,
 // compress_format_version == 2 -- decompressed size is included in the block
 // header in varint32 format
 inline CacheAllocationPtr BZip2_Uncompress(
-    const char* input_data, size_t input_length, int* decompress_size,
+    const char* input_data, size_t input_length, size_t* uncompressed_size,
     uint32_t compress_format_version, MemoryAllocator* allocator = nullptr) {
 #ifdef BZIP2
   uint32_t output_len = 0;
@@ -982,13 +1050,14 @@ inline CacheAllocationPtr BZip2_Uncompress(
 
   // If we encoded decompressed block size, we should have no bytes left
   assert(compress_format_version != 2 || _stream.avail_out == 0);
-  *decompress_size = static_cast<int>(output_len - _stream.avail_out);
+  assert(output_len >= _stream.avail_out);
+  *uncompressed_size = output_len - _stream.avail_out;
   BZ2_bzDecompressEnd(&_stream);
   return output;
 #else
   (void)input_data;
   (void)input_length;
-  (void)decompress_size;
+  (void)uncompressed_size;
   (void)compress_format_version;
   (void)allocator;
   return nullptr;
@@ -1073,7 +1142,7 @@ inline bool LZ4_Compress(const CompressionInfo& info,
 inline CacheAllocationPtr LZ4_Uncompress(const UncompressionInfo& info,
                                          const char* input_data,
                                          size_t input_length,
-                                         int* decompress_size,
+                                         size_t* uncompressed_size,
                                          uint32_t compress_format_version,
                                          MemoryAllocator* allocator = nullptr) {
 #ifdef LZ4
@@ -1090,12 +1159,19 @@ inline CacheAllocationPtr LZ4_Uncompress(const UncompressionInfo& info,
     if (input_length < 8) {
       return nullptr;
     }
-    memcpy(&output_len, input_data, sizeof(output_len));
+    if (port::kLittleEndian) {
+      memcpy(&output_len, input_data, sizeof(output_len));
+    } else {
+      memcpy(&output_len, input_data + 4, sizeof(output_len));
+    }
     input_length -= 8;
     input_data += 8;
   }
 
   auto output = AllocateBlock(output_len, allocator);
+
+  int decompress_bytes = 0;
+
 #if LZ4_VERSION_NUMBER >= 10400  // r124+
   LZ4_streamDecode_t* stream = LZ4_createStreamDecode();
   const Slice& compression_dict = info.dict().GetRawDict();
@@ -1103,26 +1179,27 @@ inline CacheAllocationPtr LZ4_Uncompress(const UncompressionInfo& info,
     LZ4_setStreamDecode(stream, compression_dict.data(),
                         static_cast<int>(compression_dict.size()));
   }
-  *decompress_size = LZ4_decompress_safe_continue(
+  decompress_bytes = LZ4_decompress_safe_continue(
       stream, input_data, output.get(), static_cast<int>(input_length),
       static_cast<int>(output_len));
   LZ4_freeStreamDecode(stream);
 #else   // up to r123
-  *decompress_size = LZ4_decompress_safe(input_data, output.get(),
+  decompress_bytes = LZ4_decompress_safe(input_data, output.get(),
                                          static_cast<int>(input_length),
                                          static_cast<int>(output_len));
 #endif  // LZ4_VERSION_NUMBER >= 10400
 
-  if (*decompress_size < 0) {
+  if (decompress_bytes < 0) {
     return nullptr;
   }
-  assert(*decompress_size == static_cast<int>(output_len));
+  assert(decompress_bytes == static_cast<int>(output_len));
+  *uncompressed_size = decompress_bytes;
   return output;
 #else  // LZ4
   (void)info;
   (void)input_data;
   (void)input_length;
-  (void)decompress_size;
+  (void)uncompressed_size;
   (void)compress_format_version;
   (void)allocator;
   return nullptr;
@@ -1174,8 +1251,10 @@ inline bool LZ4HC_Compress(const CompressionInfo& info,
   const char* compression_dict_data =
       compression_dict.size() > 0 ? compression_dict.data() : nullptr;
   size_t compression_dict_size = compression_dict.size();
-  LZ4_loadDictHC(stream, compression_dict_data,
-                 static_cast<int>(compression_dict_size));
+  if (compression_dict_data != nullptr) {
+    LZ4_loadDictHC(stream, compression_dict_data,
+                  static_cast<int>(compression_dict_size));
+  }
 
 #if LZ4_VERSION_NUMBER >= 10700  // r129+
   outlen =
@@ -1227,13 +1306,13 @@ inline bool XPRESS_Compress(const char* /*input*/, size_t /*length*/,
 
 #ifdef XPRESS
 inline char* XPRESS_Uncompress(const char* input_data, size_t input_length,
-                               int* decompress_size) {
-  return port::xpress::Decompress(input_data, input_length, decompress_size);
+                               size_t* uncompressed_size) {
+  return port::xpress::Decompress(input_data, input_length, uncompressed_size);
 }
 #else
 inline char* XPRESS_Uncompress(const char* /*input_data*/,
                                size_t /*input_length*/,
-                               int* /*decompress_size*/) {
+                               size_t* /*uncompressed_size*/) {
   return nullptr;
 }
 #endif
@@ -1298,7 +1377,7 @@ inline bool ZSTD_Compress(const CompressionInfo& info, const char* input,
 //    dictionary.
 inline CacheAllocationPtr ZSTD_Uncompress(
     const UncompressionInfo& info, const char* input_data, size_t input_length,
-    int* decompress_size, MemoryAllocator* allocator = nullptr) {
+    size_t* uncompressed_size, MemoryAllocator* allocator = nullptr) {
 #ifdef ZSTD
   uint32_t output_len = 0;
   if (!compression::GetDecompressedSizeInfo(&input_data, &input_length,
@@ -1329,13 +1408,13 @@ inline CacheAllocationPtr ZSTD_Uncompress(
       ZSTD_decompress(output.get(), output_len, input_data, input_length);
 #endif  // ZSTD_VERSION_NUMBER >= 500
   assert(actual_output_length == output_len);
-  *decompress_size = static_cast<int>(actual_output_length);
+  *uncompressed_size = actual_output_length;
   return output;
 #else  // ZSTD
   (void)info;
   (void)input_data;
   (void)input_length;
-  (void)decompress_size;
+  (void)uncompressed_size;
   (void)allocator;
   return nullptr;
 #endif
@@ -1448,5 +1527,206 @@ inline bool CompressData(const Slice& raw,
 
   return ret;
 }
+
+inline CacheAllocationPtr UncompressData(
+    const UncompressionInfo& uncompression_info, const char* data, size_t n,
+    size_t* uncompressed_size, uint32_t compress_format_version,
+    MemoryAllocator* allocator = nullptr) {
+  switch (uncompression_info.type()) {
+    case kSnappyCompression:
+      return Snappy_Uncompress(data, n, uncompressed_size, allocator);
+    case kZlibCompression:
+      return Zlib_Uncompress(uncompression_info, data, n, uncompressed_size,
+                             compress_format_version, allocator);
+    case kBZip2Compression:
+      return BZip2_Uncompress(data, n, uncompressed_size,
+                              compress_format_version, allocator);
+    case kLZ4Compression:
+    case kLZ4HCCompression:
+      return LZ4_Uncompress(uncompression_info, data, n, uncompressed_size,
+                            compress_format_version, allocator);
+    case kXpressCompression:
+      // XPRESS allocates memory internally, thus no support for custom
+      // allocator.
+      return CacheAllocationPtr(XPRESS_Uncompress(data, n, uncompressed_size));
+    case kZSTD:
+    case kZSTDNotFinalCompression:
+      return ZSTD_Uncompress(uncompression_info, data, n, uncompressed_size,
+                             allocator);
+    default:
+      return CacheAllocationPtr();
+  }
+}
+
+// Records the compression type for subsequent WAL records.
+class CompressionTypeRecord {
+ public:
+  explicit CompressionTypeRecord(CompressionType compression_type)
+      : compression_type_(compression_type) {}
+
+  CompressionType GetCompressionType() const { return compression_type_; }
+
+  inline void EncodeTo(std::string* dst) const {
+    assert(dst != nullptr);
+    PutFixed32(dst, compression_type_);
+  }
+
+  inline Status DecodeFrom(Slice* src) {
+    constexpr char class_name[] = "CompressionTypeRecord";
+
+    uint32_t val;
+    if (!GetFixed32(src, &val)) {
+      return Status::Corruption(class_name,
+                                "Error decoding WAL compression type");
+    }
+    CompressionType compression_type = static_cast<CompressionType>(val);
+    if (!StreamingCompressionTypeSupported(compression_type)) {
+      return Status::Corruption(class_name,
+                                "WAL compression type not supported");
+    }
+    compression_type_ = compression_type;
+    return Status::OK();
+  }
+
+  inline std::string DebugString() const {
+    return "compression_type: " + CompressionTypeToString(compression_type_);
+  }
+
+ private:
+  CompressionType compression_type_;
+};
+
+// Base class to implement compression for a stream of buffers.
+// Instantiate an implementation of the class using Create() with the
+// compression type and use Compress() repeatedly.
+// The output buffer needs to be at least max_output_len.
+// Call Reset() in between frame boundaries or in case of an error.
+// NOTE: This class is not thread safe.
+class StreamingCompress {
+ public:
+  StreamingCompress(CompressionType compression_type,
+                    const CompressionOptions& opts,
+                    uint32_t compress_format_version, size_t max_output_len)
+      : compression_type_(compression_type),
+        opts_(opts),
+        compress_format_version_(compress_format_version),
+        max_output_len_(max_output_len) {}
+  virtual ~StreamingCompress() = default;
+  // compress should be called repeatedly with the same input till the method
+  // returns 0
+  // Parameters:
+  // input - buffer to compress
+  // input_size - size of input buffer
+  // output - compressed buffer allocated by caller, should be at least
+  // max_output_len
+  // output_size - size of the output buffer
+  // Returns -1 for errors, the remaining size of the input buffer that needs to
+  // be compressed
+  virtual int Compress(const char* input, size_t input_size, char* output,
+                       size_t* output_pos) = 0;
+  // static method to create object of a class inherited from StreamingCompress
+  // based on the actual compression type.
+  static StreamingCompress* Create(CompressionType compression_type,
+                                   const CompressionOptions& opts,
+                                   uint32_t compress_format_version,
+                                   size_t max_output_len);
+  virtual void Reset() = 0;
+
+ protected:
+  const CompressionType compression_type_;
+  const CompressionOptions opts_;
+  const uint32_t compress_format_version_;
+  const size_t max_output_len_;
+};
+
+// Base class to uncompress a stream of compressed buffers.
+// Instantiate an implementation of the class using Create() with the
+// compression type and use Uncompress() repeatedly.
+// The output buffer needs to be at least max_output_len.
+// Call Reset() in between frame boundaries or in case of an error.
+// NOTE: This class is not thread safe.
+class StreamingUncompress {
+ public:
+  StreamingUncompress(CompressionType compression_type,
+                      uint32_t compress_format_version, size_t max_output_len)
+      : compression_type_(compression_type),
+        compress_format_version_(compress_format_version),
+        max_output_len_(max_output_len) {}
+  virtual ~StreamingUncompress() = default;
+  // uncompress should be called again with the same input if output_size is
+  // equal to max_output_len or with the next input fragment.
+  // Parameters:
+  // input - buffer to uncompress
+  // input_size - size of input buffer
+  // output - uncompressed buffer allocated by caller, should be at least
+  // max_output_len
+  // output_size - size of the output buffer
+  // Returns -1 for errors, remaining input to be processed otherwise.
+  virtual int Uncompress(const char* input, size_t input_size, char* output,
+                         size_t* output_pos) = 0;
+  static StreamingUncompress* Create(CompressionType compression_type,
+                                     uint32_t compress_format_version,
+                                     size_t max_output_len);
+  virtual void Reset() = 0;
+
+ protected:
+  CompressionType compression_type_;
+  uint32_t compress_format_version_;
+  size_t max_output_len_;
+};
+
+class ZSTDStreamingCompress final : public StreamingCompress {
+ public:
+  explicit ZSTDStreamingCompress(const CompressionOptions& opts,
+                                 uint32_t compress_format_version,
+                                 size_t max_output_len)
+      : StreamingCompress(kZSTD, opts, compress_format_version,
+                          max_output_len) {
+#ifdef ZSTD_STREAMING
+    cctx_ = ZSTD_createCCtx();
+    assert(cctx_ != nullptr);
+    input_buffer_ = {/*src=*/nullptr, /*size=*/0, /*pos=*/0};
+#endif
+  }
+  ~ZSTDStreamingCompress() override {
+#ifdef ZSTD_STREAMING
+    ZSTD_freeCCtx(cctx_);
+#endif
+  }
+  int Compress(const char* input, size_t input_size, char* output,
+               size_t* output_pos) override;
+  void Reset() override;
+#ifdef ZSTD_STREAMING
+  ZSTD_CCtx* cctx_;
+  ZSTD_inBuffer input_buffer_;
+#endif
+};
+
+class ZSTDStreamingUncompress final : public StreamingUncompress {
+ public:
+  explicit ZSTDStreamingUncompress(uint32_t compress_format_version,
+                                   size_t max_output_len)
+      : StreamingUncompress(kZSTD, compress_format_version, max_output_len) {
+#ifdef ZSTD_STREAMING
+    dctx_ = ZSTD_createDCtx();
+    assert(dctx_ != nullptr);
+    input_buffer_ = {/*src=*/nullptr, /*size=*/0, /*pos=*/0};
+#endif
+  }
+  ~ZSTDStreamingUncompress() override {
+#ifdef ZSTD_STREAMING
+    ZSTD_freeDCtx(dctx_);
+#endif
+  }
+  int Uncompress(const char* input, size_t input_size, char* output,
+                 size_t* output_size) override;
+  void Reset() override;
+
+ private:
+#ifdef ZSTD_STREAMING
+  ZSTD_DCtx* dctx_;
+  ZSTD_inBuffer input_buffer_;
+#endif
+};
 
 }  // namespace ROCKSDB_NAMESPACE

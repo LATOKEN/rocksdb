@@ -6,15 +6,15 @@
 // Copyright (c) 2012 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
-
 #ifndef ROCKSDB_LITE
 
 #include <stdint.h>
-#include "rocksdb/sst_dump_tool.h"
 
 #include "file/random_access_file_reader.h"
 #include "port/stack_trace.h"
+#include "rocksdb/convenience.h"
 #include "rocksdb/filter_policy.h"
+#include "rocksdb/sst_dump_tool.h"
 #include "table/block_based/block_based_table_factory.h"
 #include "table/table_builder.h"
 #include "test_util/testharness.h"
@@ -32,6 +32,12 @@ static std::string MakeKey(int i) {
   return key.Encode().ToString();
 }
 
+static std::string MakeKeyWithTimeStamp(int i, uint64_t ts) {
+  char buf[100];
+  snprintf(buf, sizeof(buf), "k_%04d", i);
+  return test::KeyStr(ts, std::string(buf), /*seq=*/0, kTypeValue);
+}
+
 static std::string MakeValue(int i) {
   char buf[100];
   snprintf(buf, sizeof(buf), "v_%04d", i);
@@ -39,48 +45,12 @@ static std::string MakeValue(int i) {
   return key.Encode().ToString();
 }
 
-void createSST(const Options& opts, const std::string& file_name) {
-  Env* env = opts.env;
-  EnvOptions env_options(opts);
-  ReadOptions read_options;
-  const ImmutableCFOptions imoptions(opts);
-  const MutableCFOptions moptions(opts);
-  ROCKSDB_NAMESPACE::InternalKeyComparator ikc(opts.comparator);
-  std::unique_ptr<TableBuilder> tb;
-
-  std::unique_ptr<WritableFile> file;
-  ASSERT_OK(env->NewWritableFile(file_name, &file, env_options));
-
-  std::vector<std::unique_ptr<IntTblPropCollectorFactory> >
-      int_tbl_prop_collector_factories;
-  std::unique_ptr<WritableFileWriter> file_writer(new WritableFileWriter(
-      NewLegacyWritableFileWrapper(std::move(file)), file_name, EnvOptions()));
-  std::string column_family_name;
-  int unknown_level = -1;
-  tb.reset(opts.table_factory->NewTableBuilder(
-      TableBuilderOptions(
-          imoptions, moptions, ikc, &int_tbl_prop_collector_factories,
-          CompressionType::kNoCompression, 0 /* sample_for_compression */,
-          CompressionOptions(), false /* skip_filters */, column_family_name,
-          unknown_level),
-      TablePropertiesCollectorFactory::Context::kUnknownColumnFamily,
-      file_writer.get()));
-
-  // Populate slightly more than 1K keys
-  uint32_t num_keys = 1024;
-  for (uint32_t i = 0; i < num_keys; i++) {
-    tb->Add(MakeKey(i), MakeValue(i));
-  }
-  tb->Finish();
-  file_writer->Close();
-}
-
 void cleanup(const Options& opts, const std::string& file_name) {
   Env* env = opts.env;
-  env->DeleteFile(file_name);
+  ASSERT_OK(env->DeleteFile(file_name));
   std::string outfile_name = file_name.substr(0, file_name.length() - 4);
   outfile_name.append("_dump.txt");
-  env->DeleteFile(outfile_name);
+  env->DeleteFile(outfile_name).PermitUncheckedError();
 }
 }  // namespace
 
@@ -92,10 +62,7 @@ class SSTDumpToolTest : public testing::Test {
 
  public:
   SSTDumpToolTest() : env_(Env::Default()) {
-    const char* test_env_uri = getenv("TEST_ENV_URI");
-    if (test_env_uri) {
-      Env::LoadEnv(test_env_uri, &env_, &env_guard_);
-    }
+    EXPECT_OK(test::CreateEnvFromSystem(ConfigOptions(), &env_, &env_guard_));
     test_dir_ = test::PerThreadDBPath(env_, "sst_dump_test_db");
     Status s = env_->CreateDirIfMissing(test_dir_);
     EXPECT_OK(s);
@@ -127,7 +94,58 @@ class SSTDumpToolTest : public testing::Test {
     snprintf(usage[1], kOptLength, "%s", command);
     snprintf(usage[2], kOptLength, "--file=%s", file_path.c_str());
   }
+
+  void createSST(const Options& opts, const std::string& file_name) {
+    Env* test_env = opts.env;
+    FileOptions file_options(opts);
+    ReadOptions read_options;
+    const ImmutableOptions imoptions(opts);
+    const MutableCFOptions moptions(opts);
+    ROCKSDB_NAMESPACE::InternalKeyComparator ikc(opts.comparator);
+    std::unique_ptr<TableBuilder> tb;
+
+    IntTblPropCollectorFactories int_tbl_prop_collector_factories;
+    std::unique_ptr<WritableFileWriter> file_writer;
+    ASSERT_OK(WritableFileWriter::Create(test_env->GetFileSystem(), file_name,
+                                         file_options, &file_writer, nullptr));
+
+    std::string column_family_name;
+    int unknown_level = -1;
+    tb.reset(opts.table_factory->NewTableBuilder(
+        TableBuilderOptions(
+            imoptions, moptions, ikc, &int_tbl_prop_collector_factories,
+            CompressionType::kNoCompression, CompressionOptions(),
+            TablePropertiesCollectorFactory::Context::kUnknownColumnFamily,
+            column_family_name, unknown_level),
+        file_writer.get()));
+
+    // Populate slightly more than 1K keys
+    uint32_t num_keys = kNumKey;
+    const char* comparator_name = ikc.user_comparator()->Name();
+    if (strcmp(comparator_name, ReverseBytewiseComparator()->Name()) == 0) {
+      for (int32_t i = num_keys; i >= 0; i--) {
+        tb->Add(MakeKey(i), MakeValue(i));
+      }
+    } else if (strcmp(comparator_name,
+                      test::BytewiseComparatorWithU64TsWrapper()->Name()) ==
+               0) {
+      for (uint32_t i = 0; i < num_keys; i++) {
+        tb->Add(MakeKeyWithTimeStamp(i, 100 + i), MakeValue(i));
+      }
+    } else {
+      for (uint32_t i = 0; i < num_keys; i++) {
+        tb->Add(MakeKey(i), MakeValue(i));
+      }
+    }
+    ASSERT_OK(tb->Finish());
+    ASSERT_OK(file_writer->Close());
+  }
+
+ protected:
+  constexpr static int kNumKey = 1024;
 };
+
+constexpr int SSTDumpToolTest::kNumKey;
 
 TEST_F(SSTDumpToolTest, HelpAndVersion) {
   Options opts;
@@ -147,6 +165,54 @@ TEST_F(SSTDumpToolTest, EmptyFilter) {
   Options opts;
   opts.env = env();
   std::string file_path = MakeFilePath("rocksdb_sst_test.sst");
+  createSST(opts, file_path);
+
+  char* usage[3];
+  PopulateCommandArgs(file_path, "--command=raw", usage);
+
+  ROCKSDB_NAMESPACE::SSTDumpTool tool;
+  ASSERT_TRUE(!tool.Run(3, usage, opts));
+
+  cleanup(opts, file_path);
+  for (int i = 0; i < 3; i++) {
+    delete[] usage[i];
+  }
+}
+
+TEST_F(SSTDumpToolTest, SstDumpReverseBytewiseComparator) {
+  Options opts;
+  opts.env = env();
+  opts.comparator = ReverseBytewiseComparator();
+  BlockBasedTableOptions table_opts;
+  table_opts.filter_policy.reset(
+      ROCKSDB_NAMESPACE::NewBloomFilterPolicy(10, false));
+  opts.table_factory.reset(new BlockBasedTableFactory(table_opts));
+  std::string file_path =
+      MakeFilePath("rocksdb_sst_reverse_bytewise_comparator.sst");
+  createSST(opts, file_path);
+
+  char* usage[3];
+  PopulateCommandArgs(file_path, "--command=raw", usage);
+
+  ROCKSDB_NAMESPACE::SSTDumpTool tool;
+  ASSERT_TRUE(!tool.Run(3, usage, opts));
+
+  cleanup(opts, file_path);
+  for (int i = 0; i < 3; i++) {
+    delete[] usage[i];
+  }
+}
+
+TEST_F(SSTDumpToolTest, SstDumpComparatorWithU64Ts) {
+  Options opts;
+  opts.env = env();
+  opts.comparator = test::BytewiseComparatorWithU64TsWrapper();
+  BlockBasedTableOptions table_opts;
+  table_opts.filter_policy.reset(
+      ROCKSDB_NAMESPACE::NewBloomFilterPolicy(10, false));
+  opts.table_factory.reset(new BlockBasedTableFactory(table_opts));
+  std::string file_path =
+      MakeFilePath("rocksdb_sst_comparator_with_u64_ts.sst");
   createSST(opts, file_path);
 
   char* usage[3];
@@ -356,15 +422,46 @@ TEST_F(SSTDumpToolTest, ValidSSTPath) {
     delete[] usage[i];
   }
 }
-}  // namespace ROCKSDB_NAMESPACE
 
-#ifdef ROCKSDB_UNITTESTS_WITH_CUSTOM_OBJECTS_FROM_STATIC_LIBS
-extern "C" {
-void RegisterCustomObjects(int argc, char** argv);
+TEST_F(SSTDumpToolTest, RawOutput) {
+  Options opts;
+  opts.env = env();
+  std::string file_path = MakeFilePath("rocksdb_sst_test.sst");
+  createSST(opts, file_path);
+
+  char* usage[3];
+  PopulateCommandArgs(file_path, "--command=raw", usage);
+
+  ROCKSDB_NAMESPACE::SSTDumpTool tool;
+  ASSERT_TRUE(!tool.Run(3, usage, opts));
+
+  const std::string raw_path = MakeFilePath("rocksdb_sst_test_dump.txt");
+  std::ifstream raw_file(raw_path);
+
+  std::string tp;
+  bool is_data_block = false;
+  int key_count = 0;
+  while (getline(raw_file, tp)) {
+    if (tp.find("Data Block #") != std::string::npos) {
+      is_data_block = true;
+    }
+
+    if (is_data_block && tp.find("HEX") != std::string::npos) {
+      key_count++;
+    }
+  }
+
+  ASSERT_EQ(kNumKey, key_count);
+
+  raw_file.close();
+
+  cleanup(opts, file_path);
+  for (int i = 0; i < 3; i++) {
+    delete[] usage[i];
+  }
 }
-#else
-void RegisterCustomObjects(int /*argc*/, char** /*argv*/) {}
-#endif  // !ROCKSDB_UNITTESTS_WITH_CUSTOM_OBJECTS_FROM_STATIC_LIBS
+
+}  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {
   ROCKSDB_NAMESPACE::port::InstallStackTraceHandler();

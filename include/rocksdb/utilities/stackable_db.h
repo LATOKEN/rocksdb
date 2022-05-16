@@ -80,6 +80,10 @@ class StackableDB : public DB {
                      const Slice& val) override {
     return db_->Put(options, column_family, key, val);
   }
+  Status Put(const WriteOptions& options, ColumnFamilyHandle* column_family,
+             const Slice& key, const Slice& ts, const Slice& val) override {
+    return db_->Put(options, column_family, key, ts, val);
+  }
 
   using DB::Get;
   virtual Status Get(const ReadOptions& options,
@@ -141,6 +145,11 @@ class StackableDB : public DB {
                                              import_options, metadata, handle);
   }
 
+  using DB::VerifyFileChecksums;
+  Status VerifyFileChecksums(const ReadOptions& read_opts) override {
+    return db_->VerifyFileChecksums(read_opts);
+  }
+
   virtual Status VerifyChecksum() override { return db_->VerifyChecksum(); }
 
   virtual Status VerifyChecksum(const ReadOptions& options) override {
@@ -161,12 +170,28 @@ class StackableDB : public DB {
                         const Slice& key) override {
     return db_->Delete(wopts, column_family, key);
   }
+  Status Delete(const WriteOptions& wopts, ColumnFamilyHandle* column_family,
+                const Slice& key, const Slice& ts) override {
+    return db_->Delete(wopts, column_family, key, ts);
+  }
 
   using DB::SingleDelete;
   virtual Status SingleDelete(const WriteOptions& wopts,
                               ColumnFamilyHandle* column_family,
                               const Slice& key) override {
     return db_->SingleDelete(wopts, column_family, key);
+  }
+  Status SingleDelete(const WriteOptions& wopts,
+                      ColumnFamilyHandle* column_family, const Slice& key,
+                      const Slice& ts) override {
+    return db_->SingleDelete(wopts, column_family, key, ts);
+  }
+
+  using DB::DeleteRange;
+  Status DeleteRange(const WriteOptions& wopts,
+                     ColumnFamilyHandle* column_family, const Slice& start_key,
+                     const Slice& end_key) override {
+    return db_->DeleteRange(wopts, column_family, start_key, end_key);
   }
 
   using DB::Merge;
@@ -352,6 +377,12 @@ class StackableDB : public DB {
     return db_->GetLiveFilesChecksumInfo(checksum_list);
   }
 
+  virtual Status GetLiveFilesStorageInfo(
+      const LiveFilesStorageInfoOptions& opts,
+      std::vector<LiveFileStorageInfo>* files) override {
+    return db_->GetLiveFilesStorageInfo(opts, files);
+  }
+
   virtual void GetColumnFamilyMetaData(ColumnFamilyHandle* column_family,
                                        ColumnFamilyMetaData* cf_meta) override {
     db_->GetColumnFamilyMetaData(column_family, cf_meta);
@@ -367,6 +398,31 @@ class StackableDB : public DB {
   using DB::EndBlockCacheTrace;
   Status EndBlockCacheTrace() override { return db_->EndBlockCacheTrace(); }
 
+  using DB::StartIOTrace;
+  Status StartIOTrace(const TraceOptions& options,
+                      std::unique_ptr<TraceWriter>&& trace_writer) override {
+    return db_->StartIOTrace(options, std::move(trace_writer));
+  }
+
+  using DB::EndIOTrace;
+  Status EndIOTrace() override { return db_->EndIOTrace(); }
+
+  using DB::StartTrace;
+  Status StartTrace(const TraceOptions& options,
+                    std::unique_ptr<TraceWriter>&& trace_writer) override {
+    return db_->StartTrace(options, std::move(trace_writer));
+  }
+
+  using DB::EndTrace;
+  Status EndTrace() override { return db_->EndTrace(); }
+
+  using DB::NewDefaultReplayer;
+  Status NewDefaultReplayer(const std::vector<ColumnFamilyHandle*>& handles,
+                            std::unique_ptr<TraceReader>&& reader,
+                            std::unique_ptr<Replayer>* replayer) override {
+    return db_->NewDefaultReplayer(handles, std::move(reader), replayer);
+  }
+
 #endif  // ROCKSDB_LITE
 
   virtual Status GetLiveFiles(std::vector<std::string>& vec, uint64_t* mfs,
@@ -378,9 +434,14 @@ class StackableDB : public DB {
     return db_->GetLatestSequenceNumber();
   }
 
-  virtual bool SetPreserveDeletesSequenceNumber(
-      SequenceNumber seqnum) override {
-    return db_->SetPreserveDeletesSequenceNumber(seqnum);
+  Status IncreaseFullHistoryTsLow(ColumnFamilyHandle* column_family,
+                                  std::string ts_low) override {
+    return db_->IncreaseFullHistoryTsLow(column_family, ts_low);
+  }
+
+  Status GetFullHistoryTsLow(ColumnFamilyHandle* column_family,
+                             std::string* ts_low) override {
+    return db_->GetFullHistoryTsLow(column_family, ts_low);
   }
 
   virtual Status GetSortedWalFiles(VectorLogPtr& files) override {

@@ -13,6 +13,7 @@ set(JNI_NATIVE_SOURCES
         rocksjni/cassandra_value_operator.cc
         rocksjni/checkpoint.cc
         rocksjni/clock_cache.cc
+        rocksjni/cache.cc
         rocksjni/columnfamilyhandle.cc
         rocksjni/compaction_filter.cc
         rocksjni/compaction_filter_factory.cc
@@ -26,9 +27,12 @@ set(JNI_NATIVE_SOURCES
         rocksjni/comparator.cc
         rocksjni/comparatorjnicallback.cc
         rocksjni/compression_options.cc
+        rocksjni/concurrent_task_limiter.cc
         rocksjni/config_options.cc
         rocksjni/env.cc
         rocksjni/env_options.cc
+        rocksjni/event_listener.cc
+        rocksjni/event_listener_jnicallback.cc
         rocksjni/filter.cc
         rocksjni/ingest_external_file_options.cc
         rocksjni/iterator.cc
@@ -62,6 +66,7 @@ set(JNI_NATIVE_SOURCES
         rocksjni/table.cc
         rocksjni/table_filter.cc
         rocksjni/table_filter_jnicallback.cc
+        rocksjni/testable_event_listener.cc
         rocksjni/thread_status.cc
         rocksjni/trace_writer.cc
         rocksjni/trace_writer_jnicallback.cc
@@ -86,6 +91,7 @@ set(JAVA_MAIN_CLASSES
   src/main/java/org/rocksdb/AbstractCompactionFilter.java
   src/main/java/org/rocksdb/AbstractCompactionFilterFactory.java
   src/main/java/org/rocksdb/AbstractComparator.java
+  src/main/java/org/rocksdb/AbstractEventListener.java
   src/main/java/org/rocksdb/AbstractImmutableNativeReference.java
   src/main/java/org/rocksdb/AbstractMutableOptions.java
   src/main/java/org/rocksdb/AbstractNativeReference.java
@@ -99,12 +105,14 @@ set(JAVA_MAIN_CLASSES
   src/main/java/org/rocksdb/AccessHint.java
   src/main/java/org/rocksdb/AdvancedColumnFamilyOptionsInterface.java
   src/main/java/org/rocksdb/AdvancedMutableColumnFamilyOptionsInterface.java
-  src/main/java/org/rocksdb/BackupableDBOptions.java
+  src/main/java/org/rocksdb/BackgroundErrorReason.java
+  src/main/java/org/rocksdb/BackupEngineOptions.java
   src/main/java/org/rocksdb/BackupEngine.java
   src/main/java/org/rocksdb/BackupInfo.java
   src/main/java/org/rocksdb/BlockBasedTableConfig.java
   src/main/java/org/rocksdb/BloomFilter.java
   src/main/java/org/rocksdb/BuiltinComparator.java
+  src/main/java/org/rocksdb/ByteBufferGetStatus.java
   src/main/java/org/rocksdb/Cache.java
   src/main/java/org/rocksdb/CassandraCompactionFilter.java
   src/main/java/org/rocksdb/CassandraValueMergeOperator.java
@@ -139,12 +147,16 @@ set(JAVA_MAIN_CLASSES
   src/main/java/org/rocksdb/EncodingType.java
   src/main/java/org/rocksdb/Env.java
   src/main/java/org/rocksdb/EnvOptions.java
+  src/main/java/org/rocksdb/EventListener.java
   src/main/java/org/rocksdb/Experimental.java
+  src/main/java/org/rocksdb/ExternalFileIngestionInfo.java
   src/main/java/org/rocksdb/Filter.java
+  src/main/java/org/rocksdb/FileOperationInfo.java
+  src/main/java/org/rocksdb/FlushJobInfo.java
+  src/main/java/org/rocksdb/FlushReason.java
   src/main/java/org/rocksdb/FlushOptions.java
   src/main/java/org/rocksdb/HashLinkedListMemTableConfig.java
   src/main/java/org/rocksdb/HashSkipListMemTableConfig.java
-  src/main/java/org/rocksdb/HdfsEnv.java
   src/main/java/org/rocksdb/HistogramData.java
   src/main/java/org/rocksdb/HistogramType.java
   src/main/java/org/rocksdb/Holder.java
@@ -153,6 +165,9 @@ set(JAVA_MAIN_CLASSES
   src/main/java/org/rocksdb/InfoLogLevel.java
   src/main/java/org/rocksdb/IngestExternalFileOptions.java
   src/main/java/org/rocksdb/LevelMetaData.java
+  src/main/java/org/rocksdb/ConcurrentTaskLimiter.java
+  src/main/java/org/rocksdb/ConcurrentTaskLimiterImpl.java
+  src/main/java/org/rocksdb/KeyMayExist.java
   src/main/java/org/rocksdb/LiveFileMetaData.java
   src/main/java/org/rocksdb/LogFile.java
   src/main/java/org/rocksdb/Logger.java
@@ -160,6 +175,7 @@ set(JAVA_MAIN_CLASSES
   src/main/java/org/rocksdb/MemoryUsageType.java
   src/main/java/org/rocksdb/MemoryUtil.java
   src/main/java/org/rocksdb/MemTableConfig.java
+  src/main/java/org/rocksdb/MemTableInfo.java
   src/main/java/org/rocksdb/MergeOperator.java
   src/main/java/org/rocksdb/MutableColumnFamilyOptions.java
   src/main/java/org/rocksdb/MutableColumnFamilyOptionsInterface.java
@@ -174,6 +190,7 @@ set(JAVA_MAIN_CLASSES
   src/main/java/org/rocksdb/OptimisticTransactionDB.java
   src/main/java/org/rocksdb/OptimisticTransactionOptions.java
   src/main/java/org/rocksdb/Options.java
+  src/main/java/org/rocksdb/OptionString.java
   src/main/java/org/rocksdb/OptionsUtil.java
   src/main/java/org/rocksdb/PersistentCache.java
   src/main/java/org/rocksdb/PlainTableConfig.java
@@ -215,6 +232,10 @@ set(JAVA_MAIN_CLASSES
   src/main/java/org/rocksdb/StatsLevel.java
   src/main/java/org/rocksdb/Status.java
   src/main/java/org/rocksdb/StringAppendOperator.java
+  src/main/java/org/rocksdb/TableFileCreationBriefInfo.java
+  src/main/java/org/rocksdb/TableFileCreationInfo.java
+  src/main/java/org/rocksdb/TableFileCreationReason.java
+  src/main/java/org/rocksdb/TableFileDeletionInfo.java
   src/main/java/org/rocksdb/TableFilter.java
   src/main/java/org/rocksdb/TableProperties.java
   src/main/java/org/rocksdb/TableFormatConfig.java
@@ -244,6 +265,8 @@ set(JAVA_MAIN_CLASSES
   src/main/java/org/rocksdb/WriteBatchWithIndex.java
   src/main/java/org/rocksdb/WriteOptions.java
   src/main/java/org/rocksdb/WriteBufferManager.java
+  src/main/java/org/rocksdb/WriteStallCondition.java
+  src/main/java/org/rocksdb/WriteStallInfo.java
   src/main/java/org/rocksdb/util/ByteUtil.java
   src/main/java/org/rocksdb/util/BytewiseComparator.java
   src/main/java/org/rocksdb/util/Environment.java
@@ -264,6 +287,7 @@ set(JAVA_TEST_CLASSES
   src/test/java/org/rocksdb/WriteBatchTest.java
   src/test/java/org/rocksdb/util/CapturingWriteBatchHandler.java
   src/test/java/org/rocksdb/util/WriteBatchGetter.java
+  src/test/java/org/rocksdb/test/TestableEventListener.java
 )
 
 include(FindJava)
@@ -285,13 +309,17 @@ set(JAVA_TESTCLASSPATH ${JAVA_JUNIT_JAR} ${JAVA_HAMCR_JAR} ${JAVA_MOCKITO_JAR} $
 set(JNI_OUTPUT_DIR ${PROJECT_SOURCE_DIR}/java/include)
 file(MAKE_DIRECTORY ${JNI_OUTPUT_DIR})
 
+if(${Java_VERSION_MINOR} VERSION_LESS_EQUAL "7" AND ${Java_VERSION_MAJOR} STREQUAL "1")
+  message(FATAL_ERROR "Detected Java 7 or older (${Java_VERSION_STRING}), minimum required version in now Java 8")
+endif()
+
 if(${Java_VERSION_MAJOR} VERSION_GREATER_EQUAL "10" AND ${CMAKE_VERSION} VERSION_LESS "3.11.4")
   # Java 10 and newer don't have javah, but the alternative GENERATE_NATIVE_HEADERS requires CMake 3.11.4 or newer
   message(FATAL_ERROR "Detected Java 10 or newer (${Java_VERSION_STRING}), to build with CMake please upgrade CMake to 3.11.4 or newer")
 
-elseif(${CMAKE_VERSION} VERSION_LESS "3.11.4" OR (${Java_VERSION_MINOR} STREQUAL "7" AND ${Java_VERSION_MAJOR} STREQUAL "1"))
-  # Old CMake or Java 1.7 prepare the JAR...
-  message("Preparing Jar for Java 7")
+elseif(${CMAKE_VERSION} VERSION_LESS "3.11.4")
+  # Old CMake
+  message("Using an old CMAKE (${CMAKE_VERSION}) - JNI headers generated in separate step")
   add_jar(
       rocksdbjni_classes
       SOURCES
@@ -381,13 +409,14 @@ if(NOT EXISTS ${JAVA_ASSERTJ_JAR})
   file(RENAME ${JAVA_TMP_JAR} ${JAVA_ASSERTJ_JAR})
 endif()
 
-if(${CMAKE_VERSION} VERSION_LESS "3.11.4" OR (${Java_VERSION_MINOR} STREQUAL "7" AND ${Java_VERSION_MAJOR} STREQUAL "1"))
-  # Old CMake or Java 1.7 ONLY generate JNI headers, Java 1.8+ JNI is handled in add_jar step above
-  message("Preparing JNI headers for Java 7")
+if(${CMAKE_VERSION} VERSION_LESS "3.11.4")
+  # Old CMake ONLY generate JNI headers, otherwise JNI is handled in add_jar step above
+  message("Preparing JNI headers for old CMake (${CMAKE_VERSION})")
   set(NATIVE_JAVA_CLASSES
           org.rocksdb.AbstractCompactionFilter
           org.rocksdb.AbstractCompactionFilterFactory
           org.rocksdb.AbstractComparator
+          org.rocksdb.AbstractEventListener
           org.rocksdb.AbstractImmutableNativeReference
           org.rocksdb.AbstractNativeReference
           org.rocksdb.AbstractRocksIterator
@@ -396,7 +425,7 @@ if(${CMAKE_VERSION} VERSION_LESS "3.11.4" OR (${Java_VERSION_MINOR} STREQUAL "7"
           org.rocksdb.AbstractTraceWriter
           org.rocksdb.AbstractTransactionNotifier
           org.rocksdb.AbstractWalFilter
-          org.rocksdb.BackupableDBOptions
+          org.rocksdb.BackupEngineOptions
           org.rocksdb.BackupEngine
           org.rocksdb.BlockBasedTableConfig
           org.rocksdb.BloomFilter
@@ -404,6 +433,7 @@ if(${CMAKE_VERSION} VERSION_LESS "3.11.4" OR (${Java_VERSION_MINOR} STREQUAL "7"
           org.rocksdb.CassandraValueMergeOperator
           org.rocksdb.Checkpoint
           org.rocksdb.ClockCache
+          org.rocksdb.Cache
           org.rocksdb.ColumnFamilyHandle
           org.rocksdb.ColumnFamilyOptions
           org.rocksdb.CompactionJobInfo
@@ -414,6 +444,8 @@ if(${CMAKE_VERSION} VERSION_LESS "3.11.4" OR (${Java_VERSION_MINOR} STREQUAL "7"
           org.rocksdb.CompactRangeOptions
           org.rocksdb.ComparatorOptions
           org.rocksdb.CompressionOptions
+          org.rocksdb.ConcurrentTaskLimiterImpl
+          org.rocksdb.ConfigOptions
           org.rocksdb.DBOptions
           org.rocksdb.DirectSlice
           org.rocksdb.Env
@@ -422,7 +454,6 @@ if(${CMAKE_VERSION} VERSION_LESS "3.11.4" OR (${Java_VERSION_MINOR} STREQUAL "7"
           org.rocksdb.FlushOptions
           org.rocksdb.HashLinkedListMemTableConfig
           org.rocksdb.HashSkipListMemTableConfig
-          org.rocksdb.HdfsEnv
           org.rocksdb.IngestExternalFileOptions
           org.rocksdb.Logger
           org.rocksdb.LRUCache
@@ -482,6 +513,7 @@ if(${CMAKE_VERSION} VERSION_LESS "3.11.4" OR (${Java_VERSION_MINOR} STREQUAL "7"
           org.rocksdb.WriteBatchTest
           org.rocksdb.WriteBatchTestInternalHelper
           org.rocksdb.WriteBufferManager
+          org.rocksdb.test.TestableEventListener
   )
 
   create_javah(

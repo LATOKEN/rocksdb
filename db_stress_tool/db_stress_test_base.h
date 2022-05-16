@@ -13,6 +13,7 @@
 #include "db_stress_tool/db_stress_shared_state.h"
 
 namespace ROCKSDB_NAMESPACE {
+class SystemClock;
 class Transaction;
 class TransactionDB;
 
@@ -22,14 +23,18 @@ class StressTest {
 
   virtual ~StressTest();
 
-  std::shared_ptr<Cache> NewCache(size_t capacity);
+  std::shared_ptr<Cache> NewCache(size_t capacity, int32_t num_shard_bits);
+
+  static std::vector<std::string> GetBlobCompressionTags();
 
   bool BuildOptionsTable();
 
   void InitDb();
   // The initialization work is split into two parts to avoid a circular
   // dependency with `SharedState`.
-  void FinishInitDb(SharedState*);
+  virtual void FinishInitDb(SharedState*);
+
+  void TrackExpectedState(SharedState* shared);
 
   // Return false if verification fails.
   bool VerifySecondaries();
@@ -61,6 +66,9 @@ class StressTest {
   virtual void MaybeClearOneColumnFamily(ThreadState* /* thread */) {}
 
   virtual bool ShouldAcquireMutexOnKey() const { return false; }
+
+  // Returns true if DB state is tracked by the stress test.
+  virtual bool IsStateTracked() const = 0;
 
   virtual std::vector<int> GenerateColumnFamilies(
       const int /* num_column_families */, int rand_column_family) const {
@@ -197,6 +205,12 @@ class StressTest {
       const std::vector<int64_t>& rand_keys);
 #endif  // !ROCKSDB_LITE
 
+  virtual Status TestCustomOperations(
+      ThreadState* /*thread*/,
+      const std::vector<int>& /*rand_column_families*/) {
+    return Status::NotSupported("TestCustomOperations() must be overridden");
+  }
+
   void VerificationAbort(SharedState* shared, std::string msg, Status s) const;
 
   void VerificationAbort(SharedState* shared, std::string msg, int cf,
@@ -208,6 +222,8 @@ class StressTest {
 
   void Reopen(ThreadState* thread);
 
+  void CheckAndSetOptionsForUserTimestamp();
+
   std::shared_ptr<Cache> cache_;
   std::shared_ptr<Cache> compressed_cache_;
   std::shared_ptr<const FilterPolicy> filter_policy_;
@@ -216,6 +232,7 @@ class StressTest {
   TransactionDB* txn_db_;
 #endif
   Options options_;
+  SystemClock* clock_;
   std::vector<ColumnFamilyHandle*> column_families_;
   std::vector<std::string> column_family_names_;
   std::atomic<int> new_column_family_name_;
@@ -231,6 +248,7 @@ class StressTest {
   // Fields used for continuous verification from another thread
   DB* cmp_db_;
   std::vector<ColumnFamilyHandle*> cmp_cfhs_;
+  bool is_db_stopped_;
 };
 
 }  // namespace ROCKSDB_NAMESPACE

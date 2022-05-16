@@ -12,8 +12,8 @@ import java.util.*;
  * Options to control the behavior of a database.  It will be used
  * during the creation of a {@link org.rocksdb.RocksDB} (i.e., RocksDB.open()).
  *
- * If {@link #dispose()} function is not called, then it will be GC'd
- * automatically and native resources will be released as part of the process.
+ * As a descendent of {@link AbstractNativeReference}, this class is {@link AutoCloseable}
+ * and will be automatically released if opened in the preamble of a try with resources block.
  */
 public class Options extends RocksObject
     implements DBOptionsInterface<Options>,
@@ -91,6 +91,10 @@ public class Options extends RocksObject
     this.compressionOptions_ = other.compressionOptions_;
     this.rowCache_ = other.rowCache_;
     this.writeBufferManager_ = other.writeBufferManager_;
+    this.compactionThreadLimiter_ = other.compactionThreadLimiter_;
+    this.bottommostCompressionOptions_ = other.bottommostCompressionOptions_;
+    this.walFilter_ = other.walFilter_;
+    this.sstPartitionerFactory_ = other.sstPartitionerFactory_;
   }
 
   @Override
@@ -157,8 +161,20 @@ public class Options extends RocksObject
   }
 
   @Override
+  public Options oldDefaults(final int majorVersion, final int minorVersion) {
+    oldDefaults(nativeHandle_, majorVersion, minorVersion);
+    return this;
+  }
+
+  @Override
   public Options optimizeForSmallDb() {
     optimizeForSmallDb(nativeHandle_);
+    return this;
+  }
+
+  @Override
+  public Options optimizeForSmallDb(final Cache cache) {
+    optimizeForSmallDb(nativeHandle_, cache.getNativeHandle());
     return this;
   }
 
@@ -471,20 +487,6 @@ public class Options extends RocksObject
 
   @Override
   @Deprecated
-  public void setBaseBackgroundCompactions(
-      final int baseBackgroundCompactions) {
-    assert(isOwningHandle());
-    setBaseBackgroundCompactions(nativeHandle_, baseBackgroundCompactions);
-  }
-
-  @Override
-  public int baseBackgroundCompactions() {
-    assert(isOwningHandle());
-    return baseBackgroundCompactions(nativeHandle_);
-  }
-
-  @Override
-  @Deprecated
   public Options setMaxBackgroundCompactions(
       final int maxBackgroundCompactions) {
     assert(isOwningHandle());
@@ -646,6 +648,18 @@ public class Options extends RocksObject
   public long walSizeLimitMB() {
     assert(isOwningHandle());
     return walSizeLimitMB(nativeHandle_);
+  }
+
+  @Override
+  public Options setMaxWriteBatchGroupSizeBytes(long maxWriteBatchGroupSizeBytes) {
+    setMaxWriteBatchGroupSizeBytes(nativeHandle_, maxWriteBatchGroupSizeBytes);
+    return this;
+  }
+
+  @Override
+  public long maxWriteBatchGroupSizeBytes() {
+    assert (isOwningHandle());
+    return maxWriteBatchGroupSizeBytes(nativeHandle_);
   }
 
   @Override
@@ -841,21 +855,6 @@ public class Options extends RocksObject
   }
 
   @Override
-  public Options setNewTableReaderForCompactionInputs(
-      final boolean newTableReaderForCompactionInputs) {
-    assert(isOwningHandle());
-    setNewTableReaderForCompactionInputs(nativeHandle_,
-        newTableReaderForCompactionInputs);
-    return this;
-  }
-
-  @Override
-  public boolean newTableReaderForCompactionInputs() {
-    assert(isOwningHandle());
-    return newTableReaderForCompactionInputs(nativeHandle_);
-  }
-
-  @Override
   public Options setCompactionReadaheadSize(final long compactionReadaheadSize) {
     assert(isOwningHandle());
     setCompactionReadaheadSize(nativeHandle_, compactionReadaheadSize);
@@ -943,6 +942,19 @@ public class Options extends RocksObject
   public boolean strictBytesPerSync() {
     assert(isOwningHandle());
     return strictBytesPerSync(nativeHandle_);
+  }
+
+  @Override
+  public Options setListeners(final List<AbstractEventListener> listeners) {
+    assert (isOwningHandle());
+    setEventListeners(nativeHandle_, RocksCallbackObject.toNativeHandleList(listeners));
+    return this;
+  }
+
+  @Override
+  public List<AbstractEventListener> listeners() {
+    assert (isOwningHandle());
+    return Arrays.asList(eventListeners(nativeHandle_));
   }
 
   @Override
@@ -1051,6 +1063,18 @@ public class Options extends RocksObject
   public boolean skipStatsUpdateOnDbOpen() {
     assert(isOwningHandle());
     return skipStatsUpdateOnDbOpen(nativeHandle_);
+  }
+
+  @Override
+  public Options setSkipCheckingSstFileSizesOnDbOpen(boolean skipCheckingSstFileSizesOnDbOpen) {
+    setSkipCheckingSstFileSizesOnDbOpen(nativeHandle_, skipCheckingSstFileSizesOnDbOpen);
+    return this;
+  }
+
+  @Override
+  public boolean skipCheckingSstFileSizesOnDbOpen() {
+    assert (isOwningHandle());
+    return skipCheckingSstFileSizesOnDbOpen(nativeHandle_);
   }
 
   @Override
@@ -1173,19 +1197,6 @@ public class Options extends RocksObject
   }
 
   @Override
-  public Options setPreserveDeletes(final boolean preserveDeletes) {
-    assert(isOwningHandle());
-    setPreserveDeletes(nativeHandle_, preserveDeletes);
-    return this;
-  }
-
-  @Override
-  public boolean preserveDeletes() {
-    assert(isOwningHandle());
-    return preserveDeletes(nativeHandle_);
-  }
-
-  @Override
   public Options setTwoWriteQueues(final boolean twoWriteQueues) {
     assert(isOwningHandle());
     setTwoWriteQueues(nativeHandle_, twoWriteQueues);
@@ -1284,6 +1295,45 @@ public class Options extends RocksObject
   }
 
   @Override
+  public Options setCfPaths(final Collection<DbPath> cfPaths) {
+    assert (isOwningHandle());
+
+    final int len = cfPaths.size();
+    final String[] paths = new String[len];
+    final long[] targetSizes = new long[len];
+
+    int i = 0;
+    for (final DbPath dbPath : cfPaths) {
+      paths[i] = dbPath.path.toString();
+      targetSizes[i] = dbPath.targetSize;
+      i++;
+    }
+    setCfPaths(nativeHandle_, paths, targetSizes);
+    return this;
+  }
+
+  @Override
+  public List<DbPath> cfPaths() {
+    final int len = (int) cfPathsLen(nativeHandle_);
+
+    if (len == 0) {
+      return Collections.emptyList();
+    }
+
+    final String[] paths = new String[len];
+    final long[] targetSizes = new long[len];
+
+    cfPaths(nativeHandle_, paths, targetSizes);
+
+    final List<DbPath> cfPaths = new ArrayList<>();
+    for (int i = 0; i < len; i++) {
+      cfPaths.add(new DbPath(Paths.get(paths[i]), targetSizes[i]));
+    }
+
+    return cfPaths;
+  }
+
+  @Override
   public Options useFixedLengthPrefixExtractor(final int n) {
     assert(isOwningHandle());
     useFixedLengthPrefixExtractor(nativeHandle_, n);
@@ -1319,7 +1369,7 @@ public class Options extends RocksObject
     final byte[] byteCompressionTypes =
         compressionPerLevel(nativeHandle_);
     final List<CompressionType> compressionLevels = new ArrayList<>();
-    for (final Byte byteCompressionType : byteCompressionTypes) {
+    for (final byte byteCompressionType : byteCompressionTypes) {
       compressionLevels.add(CompressionType.getCompressionType(
           byteCompressionType));
     }
@@ -1574,6 +1624,17 @@ public class Options extends RocksObject
   }
 
   @Override
+  public boolean memtableWholeKeyFiltering() {
+    return memtableWholeKeyFiltering(nativeHandle_);
+  }
+
+  @Override
+  public Options setMemtableWholeKeyFiltering(final boolean memtableWholeKeyFiltering) {
+    setMemtableWholeKeyFiltering(nativeHandle_, memtableWholeKeyFiltering);
+    return this;
+  }
+
+  @Override
   public int bloomLocality() {
     return bloomLocality(nativeHandle_);
   }
@@ -1760,6 +1821,17 @@ public class Options extends RocksObject
   }
 
   @Override
+  public Options setPeriodicCompactionSeconds(final long periodicCompactionSeconds) {
+    setPeriodicCompactionSeconds(nativeHandle_, periodicCompactionSeconds);
+    return this;
+  }
+
+  @Override
+  public long periodicCompactionSeconds() {
+    return periodicCompactionSeconds(nativeHandle_);
+  }
+
+  @Override
   public Options setCompactionOptionsUniversal(
       final CompactionOptionsUniversal compactionOptionsUniversal) {
     setCompactionOptionsUniversal(nativeHandle_,
@@ -1809,6 +1881,90 @@ public class Options extends RocksObject
   }
 
   @Override
+  public Options setAvoidUnnecessaryBlockingIO(boolean avoidUnnecessaryBlockingIO) {
+    setAvoidUnnecessaryBlockingIO(nativeHandle_, avoidUnnecessaryBlockingIO);
+    return this;
+  }
+
+  @Override
+  public boolean avoidUnnecessaryBlockingIO() {
+    assert (isOwningHandle());
+    return avoidUnnecessaryBlockingIO(nativeHandle_);
+  }
+
+  @Override
+  public Options setPersistStatsToDisk(boolean persistStatsToDisk) {
+    setPersistStatsToDisk(nativeHandle_, persistStatsToDisk);
+    return this;
+  }
+
+  @Override
+  public boolean persistStatsToDisk() {
+    assert (isOwningHandle());
+    return persistStatsToDisk(nativeHandle_);
+  }
+
+  @Override
+  public Options setWriteDbidToManifest(boolean writeDbidToManifest) {
+    setWriteDbidToManifest(nativeHandle_, writeDbidToManifest);
+    return this;
+  }
+
+  @Override
+  public boolean writeDbidToManifest() {
+    assert (isOwningHandle());
+    return writeDbidToManifest(nativeHandle_);
+  }
+
+  @Override
+  public Options setLogReadaheadSize(long logReadaheadSize) {
+    setLogReadaheadSize(nativeHandle_, logReadaheadSize);
+    return this;
+  }
+
+  @Override
+  public long logReadaheadSize() {
+    assert (isOwningHandle());
+    return logReadaheadSize(nativeHandle_);
+  }
+
+  @Override
+  public Options setBestEffortsRecovery(boolean bestEffortsRecovery) {
+    setBestEffortsRecovery(nativeHandle_, bestEffortsRecovery);
+    return this;
+  }
+
+  @Override
+  public boolean bestEffortsRecovery() {
+    assert (isOwningHandle());
+    return bestEffortsRecovery(nativeHandle_);
+  }
+
+  @Override
+  public Options setMaxBgErrorResumeCount(int maxBgerrorResumeCount) {
+    setMaxBgErrorResumeCount(nativeHandle_, maxBgerrorResumeCount);
+    return this;
+  }
+
+  @Override
+  public int maxBgerrorResumeCount() {
+    assert (isOwningHandle());
+    return maxBgerrorResumeCount(nativeHandle_);
+  }
+
+  @Override
+  public Options setBgerrorResumeRetryInterval(long bgerrorResumeRetryInterval) {
+    setBgerrorResumeRetryInterval(nativeHandle_, bgerrorResumeRetryInterval);
+    return this;
+  }
+
+  @Override
+  public long bgerrorResumeRetryInterval() {
+    assert (isOwningHandle());
+    return bgerrorResumeRetryInterval(nativeHandle_);
+  }
+
+  @Override
   public Options setSstPartitionerFactory(SstPartitionerFactory sstPartitionerFactory) {
     setSstPartitionerFactory(nativeHandle_, sstPartitionerFactory.nativeHandle_);
     this.sstPartitionerFactory_ = sstPartitionerFactory;
@@ -1819,6 +1975,116 @@ public class Options extends RocksObject
   public SstPartitionerFactory sstPartitionerFactory() {
     return sstPartitionerFactory_;
   }
+
+  @Override
+  public Options setCompactionThreadLimiter(final ConcurrentTaskLimiter compactionThreadLimiter) {
+    setCompactionThreadLimiter(nativeHandle_, compactionThreadLimiter.nativeHandle_);
+    this.compactionThreadLimiter_ = compactionThreadLimiter;
+    return this;
+  }
+
+  @Override
+  public ConcurrentTaskLimiter compactionThreadLimiter() {
+    assert (isOwningHandle());
+    return this.compactionThreadLimiter_;
+  }
+
+  //
+  // BEGIN options for blobs (integrated BlobDB)
+  //
+
+  @Override
+  public Options setEnableBlobFiles(final boolean enableBlobFiles) {
+    setEnableBlobFiles(nativeHandle_, enableBlobFiles);
+    return this;
+  }
+
+  @Override
+  public boolean enableBlobFiles() {
+    return enableBlobFiles(nativeHandle_);
+  }
+
+  @Override
+  public Options setMinBlobSize(final long minBlobSize) {
+    setMinBlobSize(nativeHandle_, minBlobSize);
+    return this;
+  }
+
+  @Override
+  public long minBlobSize() {
+    return minBlobSize(nativeHandle_);
+  }
+
+  @Override
+  public Options setBlobFileSize(final long blobFileSize) {
+    setBlobFileSize(nativeHandle_, blobFileSize);
+    return this;
+  }
+
+  @Override
+  public long blobFileSize() {
+    return blobFileSize(nativeHandle_);
+  }
+
+  @Override
+  public Options setBlobCompressionType(CompressionType compressionType) {
+    setBlobCompressionType(nativeHandle_, compressionType.getValue());
+    return this;
+  }
+
+  @Override
+  public CompressionType blobCompressionType() {
+    return CompressionType.values()[blobCompressionType(nativeHandle_)];
+  }
+
+  @Override
+  public Options setEnableBlobGarbageCollection(final boolean enableBlobGarbageCollection) {
+    setEnableBlobGarbageCollection(nativeHandle_, enableBlobGarbageCollection);
+    return this;
+  }
+
+  @Override
+  public boolean enableBlobGarbageCollection() {
+    return enableBlobGarbageCollection(nativeHandle_);
+  }
+
+  @Override
+  public Options setBlobGarbageCollectionAgeCutoff(final double blobGarbageCollectionAgeCutoff) {
+    setBlobGarbageCollectionAgeCutoff(nativeHandle_, blobGarbageCollectionAgeCutoff);
+    return this;
+  }
+
+  @Override
+  public double blobGarbageCollectionAgeCutoff() {
+    return blobGarbageCollectionAgeCutoff(nativeHandle_);
+  }
+
+  @Override
+  public Options setBlobGarbageCollectionForceThreshold(
+      final double blobGarbageCollectionForceThreshold) {
+    setBlobGarbageCollectionForceThreshold(nativeHandle_, blobGarbageCollectionForceThreshold);
+    return this;
+  }
+
+  @Override
+  public double blobGarbageCollectionForceThreshold() {
+    return blobGarbageCollectionForceThreshold(nativeHandle_);
+  }
+
+  @Override
+  public Options setBlobCompactionReadaheadSize(final long blobCompactionReadaheadSize) {
+    setBlobCompactionReadaheadSize(nativeHandle_, blobCompactionReadaheadSize);
+    return this;
+  }
+
+  @Override
+  public long blobCompactionReadaheadSize() {
+    return blobCompactionReadaheadSize(nativeHandle_);
+  }
+
+  //
+  // END options for blobs (integrated BlobDB)
+  //
 
   private native static long newOptions();
   private native static long newOptions(long dbOptHandle,
@@ -1872,9 +2138,6 @@ public class Options extends RocksObject
   private native void setDeleteObsoleteFilesPeriodMicros(
       long handle, long micros);
   private native long deleteObsoleteFilesPeriodMicros(long handle);
-  private native void setBaseBackgroundCompactions(long handle,
-      int baseBackgroundCompactions);
-  private native int baseBackgroundCompactions(long handle);
   private native void setMaxBackgroundCompactions(
       long handle, int maxBackgroundCompactions);
   private native int maxBackgroundCompactions(long handle);
@@ -1909,6 +2172,9 @@ public class Options extends RocksObject
   private native long walTtlSeconds(long handle);
   private native void setWalSizeLimitMB(long handle, long sizeLimitMB);
   private native long walSizeLimitMB(long handle);
+  private static native void setMaxWriteBatchGroupSizeBytes(
+      final long handle, final long maxWriteBatchGroupSizeBytes);
+  private static native long maxWriteBatchGroupSizeBytes(final long handle);
   private native void setManifestPreallocationSize(
       long handle, long size) throws IllegalArgumentException;
   private native long manifestPreallocationSize(long handle);
@@ -1951,9 +2217,6 @@ public class Options extends RocksObject
   private native void setAccessHintOnCompactionStart(final long handle,
       final byte accessHintOnCompactionStart);
   private native byte accessHintOnCompactionStart(final long handle);
-  private native void setNewTableReaderForCompactionInputs(final long handle,
-      final boolean newTableReaderForCompactionInputs);
-  private native boolean newTableReaderForCompactionInputs(final long handle);
   private native void setCompactionReadaheadSize(final long handle,
       final long compactionReadaheadSize);
   private native long compactionReadaheadSize(final long handle);
@@ -1975,6 +2238,9 @@ public class Options extends RocksObject
       final long handle, final boolean strictBytesPerSync);
   private native boolean strictBytesPerSync(
       final long handle);
+  private static native void setEventListeners(
+      final long handle, final long[] eventListenerHandles);
+  private static native AbstractEventListener[] eventListeners(final long handle);
   private native void setEnableThreadTracking(long handle,
       boolean enableThreadTracking);
   private native boolean enableThreadTracking(long handle);
@@ -2001,6 +2267,9 @@ public class Options extends RocksObject
   private native void setSkipStatsUpdateOnDbOpen(final long handle,
       final boolean skipStatsUpdateOnDbOpen);
   private native boolean skipStatsUpdateOnDbOpen(final long handle);
+  private static native void setSkipCheckingSstFileSizesOnDbOpen(
+      final long handle, final boolean skipChecking);
+  private static native boolean skipCheckingSstFileSizesOnDbOpen(final long handle);
   private native void setWalRecoveryMode(final long handle,
       final byte walRecoveryMode);
   private native byte walRecoveryMode(final long handle);
@@ -2026,9 +2295,6 @@ public class Options extends RocksObject
   private native void setAllowIngestBehind(final long handle,
       final boolean allowIngestBehind);
   private native boolean allowIngestBehind(final long handle);
-  private native void setPreserveDeletes(final long handle,
-      final boolean preserveDeletes);
-  private native boolean preserveDeletes(final long handle);
   private native void setTwoWriteQueues(final long handle,
       final boolean twoWriteQueues);
   private native boolean twoWriteQueues(final long handle);
@@ -2038,7 +2304,10 @@ public class Options extends RocksObject
 
 
   // CF native handles
+  private static native void oldDefaults(
+      final long handle, final int majorVersion, final int minorVersion);
   private native void optimizeForSmallDb(final long handle);
+  private static native void optimizeForSmallDb(final long handle, final long cacheHandle);
   private native void optimizeForPointLookup(long handle,
       long blockCacheSizeMb);
   private native void optimizeLevelStyleCompaction(long handle,
@@ -2125,6 +2394,11 @@ public class Options extends RocksObject
   private native String memTableFactoryName(long handle);
   private native void setTableFactory(long handle, long factoryHandle);
   private native String tableFactoryName(long handle);
+  private static native void setCfPaths(
+      final long handle, final String[] paths, final long[] targetSizes);
+  private static native long cfPathsLen(final long handle);
+  private static native void cfPaths(
+      final long handle, final String[] paths, final long[] targetSizes);
   private native void setInplaceUpdateSupport(
       long handle, boolean inplaceUpdateSupport);
   private native boolean inplaceUpdateSupport(long handle);
@@ -2135,6 +2409,8 @@ public class Options extends RocksObject
   private native void setMemtablePrefixBloomSizeRatio(
       long handle, double memtablePrefixBloomSizeRatio);
   private native double memtablePrefixBloomSizeRatio(long handle);
+  private native void setMemtableWholeKeyFiltering(long handle, boolean memtableWholeKeyFiltering);
+  private native boolean memtableWholeKeyFiltering(long handle);
   private native void setBloomLocality(
       long handle, int bloomLocality);
   private native int bloomLocality(long handle);
@@ -2180,6 +2456,9 @@ public class Options extends RocksObject
   private native boolean reportBgIoStats(final long handle);
   private native void setTtl(final long handle, final long ttl);
   private native long ttl(final long handle);
+  private native void setPeriodicCompactionSeconds(
+      final long handle, final long periodicCompactionSeconds);
+  private native long periodicCompactionSeconds(final long handle);
   private native void setCompactionOptionsUniversal(final long handle,
       final long compactionOptionsUniversalHandle);
   private native void setCompactionOptionsFIFO(final long handle,
@@ -2191,6 +2470,49 @@ public class Options extends RocksObject
       final boolean atomicFlush);
   private native boolean atomicFlush(final long handle);
   private native void setSstPartitionerFactory(long nativeHandle_, long newFactoryHandle);
+  private static native void setCompactionThreadLimiter(
+      final long nativeHandle_, final long newLimiterHandle);
+  private static native void setAvoidUnnecessaryBlockingIO(
+      final long handle, final boolean avoidBlockingIO);
+  private static native boolean avoidUnnecessaryBlockingIO(final long handle);
+  private static native void setPersistStatsToDisk(
+      final long handle, final boolean persistStatsToDisk);
+  private static native boolean persistStatsToDisk(final long handle);
+  private static native void setWriteDbidToManifest(
+      final long handle, final boolean writeDbidToManifest);
+  private static native boolean writeDbidToManifest(final long handle);
+  private static native void setLogReadaheadSize(final long handle, final long logReadaheadSize);
+  private static native long logReadaheadSize(final long handle);
+  private static native void setBestEffortsRecovery(
+      final long handle, final boolean bestEffortsRecovery);
+  private static native boolean bestEffortsRecovery(final long handle);
+  private static native void setMaxBgErrorResumeCount(
+      final long handle, final int maxBgerrorRecumeCount);
+  private static native int maxBgerrorResumeCount(final long handle);
+  private static native void setBgerrorResumeRetryInterval(
+      final long handle, final long bgerrorResumeRetryInterval);
+  private static native long bgerrorResumeRetryInterval(final long handle);
+
+  private native void setEnableBlobFiles(final long nativeHandle_, final boolean enableBlobFiles);
+  private native boolean enableBlobFiles(final long nativeHandle_);
+  private native void setMinBlobSize(final long nativeHandle_, final long minBlobSize);
+  private native long minBlobSize(final long nativeHandle_);
+  private native void setBlobFileSize(final long nativeHandle_, final long blobFileSize);
+  private native long blobFileSize(final long nativeHandle_);
+  private native void setBlobCompressionType(final long nativeHandle_, final byte compressionType);
+  private native byte blobCompressionType(final long nativeHandle_);
+  private native void setEnableBlobGarbageCollection(
+      final long nativeHandle_, final boolean enableBlobGarbageCollection);
+  private native boolean enableBlobGarbageCollection(final long nativeHandle_);
+  private native void setBlobGarbageCollectionAgeCutoff(
+      final long nativeHandle_, final double blobGarbageCollectionAgeCutoff);
+  private native double blobGarbageCollectionAgeCutoff(final long nativeHandle_);
+  private native void setBlobGarbageCollectionForceThreshold(
+      final long nativeHandle_, final double blobGarbageCollectionForceThreshold);
+  private native double blobGarbageCollectionForceThreshold(final long nativeHandle_);
+  private native void setBlobCompactionReadaheadSize(
+      final long nativeHandle_, final long blobCompactionReadaheadSize);
+  private native long blobCompactionReadaheadSize(final long nativeHandle_);
 
   // instance variables
   // NOTE: If you add new member variables, please update the copy constructor above!
@@ -2210,4 +2532,5 @@ public class Options extends RocksObject
   private WalFilter walFilter_;
   private WriteBufferManager writeBufferManager_;
   private SstPartitionerFactory sstPartitionerFactory_;
+  private ConcurrentTaskLimiter compactionThreadLimiter_;
 }

@@ -9,6 +9,8 @@
 
 #include <cstring>
 
+#include "options/cf_options.h"
+#include "options/db_options.h"
 #include "options/options_helper.h"
 #include "rocksdb/convenience.h"
 #include "test_util/testharness.h"
@@ -39,16 +41,22 @@ class OptionsSettableTest : public testing::Test {
 };
 
 const char kSpecialChar = 'z';
-typedef std::vector<std::pair<size_t, size_t>> OffsetGap;
+using OffsetGap = std::vector<std::pair<size_t, size_t>>;
 
 void FillWithSpecialChar(char* start_ptr, size_t total_size,
                          const OffsetGap& excluded,
                          char special_char = kSpecialChar) {
   size_t offset = 0;
+  // The excluded vector contains pairs of bytes, (first, second).
+  // The first bytes are all set to the special char (represented as 'c' below).
+  // The second bytes are simply skipped (padding bytes).
+  // ccccc[skipped]cccccccc[skiped]cccccccc[skipped]
   for (auto& pair : excluded) {
     std::memset(start_ptr + offset, special_char, pair.first - offset);
     offset = pair.first + pair.second;
   }
+  // The rest of the structure is filled with the special characters.
+  // ccccc[skipped]cccccccc[skiped]cccccccc[skipped]cccccccccccccccc
   std::memset(start_ptr + offset, special_char, total_size - offset);
 }
 
@@ -57,6 +65,10 @@ int NumUnsetBytes(char* start_ptr, size_t total_size,
   int total_unset_bytes_base = 0;
   size_t offset = 0;
   for (auto& pair : excluded) {
+    // The first part of the structure contains memory spaces that can be
+    // set (pair.first), and memory spaces that cannot be set (pair.second).
+    // Therefore total_unset_bytes_base only agregates bytes set to kSpecialChar
+    // in the pair.first bytes, but skips the pair.second bytes (padding bytes).
     for (char* ptr = start_ptr + offset; ptr < start_ptr + pair.first; ptr++) {
       if (*ptr == kSpecialChar) {
         total_unset_bytes_base++;
@@ -64,6 +76,8 @@ int NumUnsetBytes(char* start_ptr, size_t total_size,
     }
     offset = pair.first + pair.second;
   }
+  // Then total_unset_bytes_base aggregates the bytes
+  // set to kSpecialChar in the rest of the structure
   for (char* ptr = start_ptr + offset; ptr < start_ptr + total_size; ptr++) {
     if (*ptr == kSpecialChar) {
       total_unset_bytes_base++;
@@ -156,25 +170,31 @@ TEST_F(OptionsSettableTest, BlockBasedTableOptionsAllFieldsSettable) {
       *bbto,
       "cache_index_and_filter_blocks=1;"
       "cache_index_and_filter_blocks_with_high_priority=true;"
+      "metadata_cache_options={top_level_index_pinning=kFallback;"
+      "partition_pinning=kAll;"
+      "unpartitioned_pinning=kFlushedAndSimilar;};"
       "pin_l0_filter_and_index_blocks_in_cache=1;"
       "pin_top_level_index_and_filter=1;"
       "index_type=kHashSearch;"
       "data_block_index_type=kDataBlockBinaryAndHash;"
       "index_shortening=kNoShortening;"
       "data_block_hash_table_util_ratio=0.75;"
-      "checksum=kxxHash;hash_index_allow_collision=1;no_block_cache=1;"
+      "checksum=kxxHash;no_block_cache=1;"
       "block_cache=1M;block_cache_compressed=1k;block_size=1024;"
       "block_size_deviation=8;block_restart_interval=4; "
       "metadata_block_size=1024;"
       "partition_filters=false;"
       "optimize_filters_for_memory=true;"
       "index_block_restart_interval=4;"
-      "filter_policy=bloomfilter:4:true;whole_key_filtering=1;"
+      "filter_policy=bloomfilter:4:true;whole_key_filtering=1;detect_filter_"
+      "construct_corruption=false;"
+      "reserve_table_builder_memory=false;"
       "format_version=1;"
-      "hash_index_allow_collision=false;"
       "verify_compression=true;read_amp_bytes_per_bit=0;"
       "enable_index_compression=false;"
-      "block_align=true",
+      "block_align=true;"
+      "max_auto_readahead_size=0;"
+      "prepopulate_block_cache=kDisable",
       new_bbto));
 
   ASSERT_EQ(unset_bytes_base,
@@ -221,6 +241,11 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
       {offsetof(struct DBOptions, wal_filter), sizeof(const WalFilter*)},
       {offsetof(struct DBOptions, file_checksum_gen_factory),
        sizeof(std::shared_ptr<FileChecksumGenFactory>)},
+      {offsetof(struct DBOptions, db_host_id), sizeof(std::string)},
+      {offsetof(struct DBOptions, checksum_handoff_file_types),
+       sizeof(FileTypeSet)},
+      {offsetof(struct DBOptions, compaction_service),
+       sizeof(std::shared_ptr<CompactionService>)},
   };
 
   char* options_ptr = new char[sizeof(DBOptions)];
@@ -261,21 +286,20 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "max_open_files=72;"
                              "max_file_opening_threads=35;"
                              "max_background_jobs=8;"
-                             "base_background_compactions=3;"
                              "max_background_compactions=33;"
                              "use_fsync=true;"
                              "use_adaptive_mutex=false;"
                              "max_total_wal_size=4295005604;"
                              "compaction_readahead_size=0;"
-                             "new_table_reader_for_compaction_inputs=false;"
                              "keep_log_file_num=4890;"
                              "skip_stats_update_on_db_open=false;"
                              "skip_checking_sst_file_sizes_on_db_open=false;"
                              "max_manifest_file_size=4295009941;"
                              "db_log_dir=path/to/db_log_dir;"
-                             "skip_log_error_on_recovery=true;"
                              "writable_file_max_buffer_size=1048576;"
                              "paranoid_checks=true;"
+                             "flush_verify_memtable_count=true;"
+                             "track_and_verify_wals_in_manifest=true;"
                              "is_fd_close_on_exec=false;"
                              "bytes_per_sync=4295013613;"
                              "strict_bytes_per_sync=true;"
@@ -315,10 +339,10 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "avoid_flush_during_recovery=false;"
                              "avoid_flush_during_shutdown=false;"
                              "allow_ingest_behind=false;"
-                             "preserve_deletes=false;"
                              "concurrent_prepare=false;"
                              "two_write_queues=false;"
                              "manual_wal_flush=false;"
+                             "wal_compression=kZSTD;"
                              "seq_per_batch=false;"
                              "atomic_flush=false;"
                              "avoid_unnecessary_blocking_io=false;"
@@ -326,7 +350,10 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "write_dbid_to_manifest=false;"
                              "best_efforts_recovery=false;"
                              "max_bgerror_resume_count=2;"
-                             "bgerror_resume_retry_interval=1000000",
+                             "bgerror_resume_retry_interval=1000000"
+                             "db_host_id=hostname;"
+                             "lowest_used_cache_tier=kNonVolatileBlockTier;"
+                             "allow_data_in_errors=false",
                              new_options));
 
   ASSERT_EQ(unset_bytes_base, NumUnsetBytes(new_options_ptr, sizeof(DBOptions),
@@ -337,12 +364,6 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
 
   delete[] options_ptr;
   delete[] new_options_ptr;
-}
-
-template <typename T1, typename T2>
-inline int offset_of(T1 T2::*member) {
-  static T2 obj;
-  return int(size_t(&(obj.*member)) - size_t(&obj));
 }
 
 // If the test fails, likely a new option is added to ColumnFamilyOptions
@@ -358,36 +379,39 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
   // options in the excluded set need to appear in the same order as in
   // ColumnFamilyOptions.
   const OffsetGap kColumnFamilyOptionsExcluded = {
-      {offset_of(&ColumnFamilyOptions::inplace_callback),
+      {offsetof(struct ColumnFamilyOptions, inplace_callback),
        sizeof(UpdateStatus(*)(char*, uint32_t*, Slice, std::string*))},
-      {offset_of(
-           &ColumnFamilyOptions::memtable_insert_with_hint_prefix_extractor),
+      {offsetof(struct ColumnFamilyOptions,
+                memtable_insert_with_hint_prefix_extractor),
        sizeof(std::shared_ptr<const SliceTransform>)},
-      {offset_of(&ColumnFamilyOptions::compression_per_level),
+      {offsetof(struct ColumnFamilyOptions, compression_per_level),
        sizeof(std::vector<CompressionType>)},
-      {offset_of(
-           &ColumnFamilyOptions::max_bytes_for_level_multiplier_additional),
+      {offsetof(struct ColumnFamilyOptions,
+                max_bytes_for_level_multiplier_additional),
        sizeof(std::vector<int>)},
-      {offset_of(&ColumnFamilyOptions::memtable_factory),
+      {offsetof(struct ColumnFamilyOptions, memtable_factory),
        sizeof(std::shared_ptr<MemTableRepFactory>)},
-      {offset_of(&ColumnFamilyOptions::table_properties_collector_factories),
+      {offsetof(struct ColumnFamilyOptions,
+                table_properties_collector_factories),
        sizeof(ColumnFamilyOptions::TablePropertiesCollectorFactories)},
-      {offset_of(&ColumnFamilyOptions::comparator), sizeof(Comparator*)},
-      {offset_of(&ColumnFamilyOptions::merge_operator),
+      {offsetof(struct ColumnFamilyOptions, comparator), sizeof(Comparator*)},
+      {offsetof(struct ColumnFamilyOptions, merge_operator),
        sizeof(std::shared_ptr<MergeOperator>)},
-      {offset_of(&ColumnFamilyOptions::compaction_filter),
+      {offsetof(struct ColumnFamilyOptions, compaction_filter),
        sizeof(const CompactionFilter*)},
-      {offset_of(&ColumnFamilyOptions::compaction_filter_factory),
+      {offsetof(struct ColumnFamilyOptions, compaction_filter_factory),
        sizeof(std::shared_ptr<CompactionFilterFactory>)},
-      {offset_of(&ColumnFamilyOptions::prefix_extractor),
+      {offsetof(struct ColumnFamilyOptions, prefix_extractor),
        sizeof(std::shared_ptr<const SliceTransform>)},
-      {offset_of(&ColumnFamilyOptions::snap_refresh_nanos), sizeof(uint64_t)},
-      {offset_of(&ColumnFamilyOptions::table_factory),
+      {offsetof(struct ColumnFamilyOptions, snap_refresh_nanos),
+       sizeof(uint64_t)},
+      {offsetof(struct ColumnFamilyOptions, table_factory),
        sizeof(std::shared_ptr<TableFactory>)},
-      {offset_of(&ColumnFamilyOptions::cf_paths), sizeof(std::vector<DbPath>)},
-      {offset_of(&ColumnFamilyOptions::compaction_thread_limiter),
+      {offsetof(struct ColumnFamilyOptions, cf_paths),
+       sizeof(std::vector<DbPath>)},
+      {offsetof(struct ColumnFamilyOptions, compaction_thread_limiter),
        sizeof(std::shared_ptr<ConcurrentTaskLimiter>)},
-      {offset_of(&ColumnFamilyOptions::sst_partitioner_factory),
+      {offsetof(struct ColumnFamilyOptions, sst_partitioner_factory),
        sizeof(std::shared_ptr<SstPartitionerFactory>)},
   };
 
@@ -396,18 +420,14 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
   // Count padding bytes by setting all bytes in the memory to a special char,
   // copy a well constructed struct to this memory and see how many special
   // bytes left.
-  ColumnFamilyOptions* options = new (options_ptr) ColumnFamilyOptions();
   FillWithSpecialChar(options_ptr, sizeof(ColumnFamilyOptions),
                       kColumnFamilyOptionsExcluded);
 
-  // It based on the behavior of compiler that padding bytes are not changed
-  // when copying the struct. It's prone to failure when compiler behavior
-  // changes. We verify there is unset bytes to detect the case.
-  *options = ColumnFamilyOptions();
-
-  // Deprecatd option which is not initialized. Need to set it to avoid
-  // Valgrind error
-  options->max_mem_compaction_level = 0;
+  // Invoke a user-defined constructor in the hope that it does not overwrite
+  // padding bytes. Note that previously we relied on the implicitly-defined
+  // copy-assignment operator (i.e., `*options = ColumnFamilyOptions();`) here,
+  // which did in fact modify padding bytes.
+  ColumnFamilyOptions* options = new (options_ptr) ColumnFamilyOptions();
 
   int unset_bytes_base = NumUnsetBytes(options_ptr, sizeof(ColumnFamilyOptions),
                                        kColumnFamilyOptionsExcluded);
@@ -420,12 +440,8 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
 
   // Following options are not settable through
   // GetColumnFamilyOptionsFromString():
-  options->rate_limit_delay_max_milliseconds = 33;
   options->compaction_options_universal = CompactionOptionsUniversal();
-  options->hard_rate_limit = 0;
-  options->soft_rate_limit = 0;
-  options->purge_redundant_kvs_while_flush = false;
-  options->max_mem_compaction_level = 0;
+  options->num_levels = 42;  // Initialize options for MutableCF
   options->compaction_filter = nullptr;
   options->sst_partitioner_factory = nullptr;
 
@@ -460,15 +476,14 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
       "max_bytes_for_level_multiplier=60;"
       "memtable_factory=SkipListFactory;"
       "compression=kNoCompression;"
-      "compression_opts=5:6:7:8:9:true;"
-      "bottommost_compression_opts=4:5:6:7:8:true;"
+      "compression_opts=5:6:7:8:9:10:true:11;"
+      "bottommost_compression_opts=4:5:6:7:8:9:true:10;"
       "bottommost_compression=kDisableCompressionOption;"
       "level0_stop_writes_trigger=33;"
       "num_levels=99;"
       "level0_slowdown_writes_trigger=22;"
       "level0_file_num_compaction_trigger=14;"
       "compaction_filter=urxcqstuwnCompactionFilter;"
-      "soft_rate_limit=530.615385;"
       "soft_pending_compaction_bytes_limit=0;"
       "max_write_buffer_number_to_maintain=84;"
       "max_write_buffer_size_to_maintain=2147483648;"
@@ -476,6 +491,7 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
       "memtable_prefix_bloom_size_ratio=0.4642;"
       "memtable_whole_key_filtering=true;"
       "memtable_insert_with_hint_prefix_extractor=rocksdb.CappedPrefix.13;"
+      "check_flush_compaction_key_order=false;"
       "paranoid_file_checks=true;"
       "force_consistency_checks=true;"
       "inplace_update_num_locks=7429;"
@@ -494,8 +510,13 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
       "min_blob_size=256;"
       "blob_file_size=1000000;"
       "blob_compression_type=kBZip2Compression;"
+      "enable_blob_garbage_collection=true;"
+      "blob_garbage_collection_age_cutoff=0.5;"
+      "blob_garbage_collection_force_threshold=0.75;"
+      "blob_compaction_readahead_size=262144;"
+      "bottommost_temperature=kWarm;"
       "compaction_options_fifo={max_table_files_size=3;allow_"
-      "compaction=false;};",
+      "compaction=false;age_for_warm=1;};",
       new_options));
 
   ASSERT_EQ(unset_bytes_base,
@@ -513,11 +534,14 @@ TEST_F(OptionsSettableTest, ColumnFamilyOptionsAllFieldsSettable) {
   // Test copying to mutabable and immutable options and copy back the mutable
   // part.
   const OffsetGap kMutableCFOptionsExcluded = {
-      {offset_of(&MutableCFOptions::prefix_extractor),
+      {offsetof(struct MutableCFOptions, prefix_extractor),
        sizeof(std::shared_ptr<const SliceTransform>)},
-      {offset_of(&MutableCFOptions::max_bytes_for_level_multiplier_additional),
+      {offsetof(struct MutableCFOptions,
+                max_bytes_for_level_multiplier_additional),
        sizeof(std::vector<int>)},
-      {offset_of(&MutableCFOptions::max_file_size),
+      {offsetof(struct MutableCFOptions, compression_per_level),
+       sizeof(std::vector<CompressionType>)},
+      {offsetof(struct MutableCFOptions, max_file_size),
        sizeof(std::vector<uint64_t>)},
   };
 

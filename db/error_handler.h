@@ -14,22 +14,32 @@ namespace ROCKSDB_NAMESPACE {
 
 class DBImpl;
 
+// This structure is used to store the DB recovery context. The context is
+// the information that related to the recover actions. For example, it contains
+// FlushReason, which tells the flush job why this flush is called.
+struct DBRecoverContext {
+  FlushReason flush_reason;
+
+  DBRecoverContext() : flush_reason(FlushReason::kErrorRecovery) {}
+
+  DBRecoverContext(FlushReason reason) : flush_reason(reason) {}
+};
+
 class ErrorHandler {
   public:
    ErrorHandler(DBImpl* db, const ImmutableDBOptions& db_options,
                 InstrumentedMutex* db_mutex)
        : db_(db),
          db_options_(db_options),
-         bg_error_(Status::OK()),
-         recovery_error_(Status::OK()),
-         recovery_io_error_(IOStatus::OK()),
          cv_(db_mutex),
          end_recovery_(false),
          recovery_thread_(nullptr),
          db_mutex_(db_mutex),
          auto_recovery_(false),
-         recovery_in_prog_(false) {}
-   ~ErrorHandler() {
+         recovery_in_prog_(false),
+         soft_error_no_bg_work_(false),
+         bg_error_stats_(db_options.statistics) {
+     // Clear the checked flag for uninitialized errors
      bg_error_.PermitUncheckedError();
      recovery_error_.PermitUncheckedError();
      recovery_io_error_.PermitUncheckedError();
@@ -41,13 +51,11 @@ class ErrorHandler {
                                      Status::Code code,
                                      Status::SubCode subcode);
 
-   Status SetBGError(const Status& bg_err, BackgroundErrorReason reason);
+   const Status& SetBGError(const Status& bg_err, BackgroundErrorReason reason);
 
-   Status SetBGError(const IOStatus& bg_io_err, BackgroundErrorReason reason);
+   Status GetBGError() const { return bg_error_; }
 
-   Status GetBGError() { return bg_error_; }
-
-   Status GetRecoveryError() { return recovery_error_; }
+   Status GetRecoveryError() const { return recovery_error_; }
 
    Status ClearBGError();
 
@@ -59,8 +67,10 @@ class ErrorHandler {
     bool IsBGWorkStopped() {
       return !bg_error_.ok() &&
              (bg_error_.severity() >= Status::Severity::kHardError ||
-              !auto_recovery_);
+              !auto_recovery_ || soft_error_no_bg_work_);
     }
+
+    bool IsSoftErrorNoBGWork() { return soft_error_no_bg_work_; }
 
     bool IsRecoveryInProgress() { return recovery_in_prog_; }
 
@@ -89,11 +99,26 @@ class ErrorHandler {
     // A flag indicating whether automatic recovery from errors is enabled
     bool auto_recovery_;
     bool recovery_in_prog_;
+    // A flag to indicate that for the soft error, we should not allow any
+    // background work except the work is from recovery.
+    bool soft_error_no_bg_work_;
 
-    Status OverrideNoSpaceError(Status bg_error, bool* auto_recovery);
+    // Used to store the context for recover, such as flush reason.
+    DBRecoverContext recover_context_;
+
+    // The pointer of DB statistics.
+    std::shared_ptr<Statistics> bg_error_stats_;
+
+    const Status& HandleKnownErrors(const Status& bg_err,
+                                    BackgroundErrorReason reason);
+    Status OverrideNoSpaceError(const Status& bg_error, bool* auto_recovery);
     void RecoverFromNoSpace();
-    Status StartRecoverFromRetryableBGIOError(IOStatus io_error);
+    const Status& StartRecoverFromRetryableBGIOError(const IOStatus& io_error);
     void RecoverFromRetryableBGIOError();
+    // First, if it is in recovery and the recovery_error is ok. Set the
+    // recovery_error_ to bg_err. Second, if the severity is higher than the
+    // current bg_error_, overwrite it.
+    void CheckAndSetRecoveryAndBGError(const Status& bg_err);
 };
 
 }  // namespace ROCKSDB_NAMESPACE

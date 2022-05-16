@@ -32,6 +32,7 @@ class LDBCommand {
  public:
   // Command-line arguments
   static const std::string ARG_ENV_URI;
+  static const std::string ARG_FS_URI;
   static const std::string ARG_DB;
   static const std::string ARG_PATH;
   static const std::string ARG_SECONDARY_PATH;
@@ -60,6 +61,14 @@ class LDBCommand {
   static const std::string ARG_CREATE_IF_MISSING;
   static const std::string ARG_NO_VALUE;
   static const std::string ARG_DISABLE_CONSISTENCY_CHECKS;
+  static const std::string ARG_ENABLE_BLOB_FILES;
+  static const std::string ARG_MIN_BLOB_SIZE;
+  static const std::string ARG_BLOB_FILE_SIZE;
+  static const std::string ARG_BLOB_COMPRESSION_TYPE;
+  static const std::string ARG_ENABLE_BLOB_GARBAGE_COLLECTION;
+  static const std::string ARG_BLOB_GARBAGE_COLLECTION_AGE_CUTOFF;
+  static const std::string ARG_BLOB_GARBAGE_COLLECTION_FORCE_THRESHOLD;
+  static const std::string ARG_BLOB_COMPACTION_READAHEAD_SIZE;
 
   struct ParsedParams {
     std::string cmd;
@@ -87,6 +96,8 @@ class LDBCommand {
   virtual void PrepareOptions();
 
   virtual void OverrideBaseOptions();
+
+  virtual void OverrideBaseCFOptions(ColumnFamilyOptions* cf_opts);
 
   virtual void SetDBOptions(Options options) { options_ = options; }
 
@@ -135,6 +146,7 @@ class LDBCommand {
  protected:
   LDBCommandExecuteResult exec_state_;
   std::string env_uri_;
+  std::string fs_uri_;
   std::string db_path_;
   // If empty, open DB as primary. If non-empty, open the DB as secondary
   // with this secondary path. When running against a database opened by
@@ -168,6 +180,10 @@ class LDBCommand {
 
   // The value passed to options.force_consistency_checks.
   bool force_consistency_checks_;
+
+  bool enable_blob_files_;
+
+  bool enable_blob_garbage_collection_;
 
   bool create_if_missing_;
 
@@ -229,8 +245,17 @@ class LDBCommand {
                       const std::string& option, int& value,
                       LDBCommandExecuteResult& exec_state);
 
+  bool ParseDoubleOption(const std::map<std::string, std::string>& options,
+                         const std::string& option, double& value,
+                         LDBCommandExecuteResult& exec_state);
+
   bool ParseStringOption(const std::map<std::string, std::string>& options,
                          const std::string& option, std::string* value);
+
+  bool ParseCompressionTypeOption(
+      const std::map<std::string, std::string>& options,
+      const std::string& option, CompressionType& value,
+      LDBCommandExecuteResult& exec_state);
 
   /**
    * Returns the value of the specified option as a boolean.

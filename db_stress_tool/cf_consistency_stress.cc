@@ -18,6 +18,8 @@ class CfConsistencyStressTest : public StressTest {
 
   ~CfConsistencyStressTest() override {}
 
+  bool IsStateTracked() const override { return false; }
+
   Status TestPut(ThreadState* thread, WriteOptions& write_opts,
                  const ReadOptions& /* read_opts */,
                  const std::vector<int>& rand_column_families,
@@ -283,97 +285,9 @@ class CfConsistencyStressTest : public StressTest {
     return column_families_[thread->rand.Next() % column_families_.size()];
   }
 
-#ifdef ROCKSDB_LITE
-  Status TestCheckpoint(ThreadState* /* thread */,
-                        const std::vector<int>& /* rand_column_families */,
-                        const std::vector<int64_t>& /* rand_keys */) override {
-    assert(false);
-    fprintf(stderr,
-            "RocksDB lite does not support "
-            "TestCheckpoint\n");
-    std::terminate();
-  }
-#else
-  Status TestCheckpoint(ThreadState* thread,
-                        const std::vector<int>& /* rand_column_families */,
-                        const std::vector<int64_t>& /* rand_keys */) override {
-    std::string checkpoint_dir =
-        FLAGS_db + "/.checkpoint" + ToString(thread->tid);
-
-    // We need to clear DB including manifest files, so make a copy
-    Options opt_copy = options_;
-    opt_copy.env = db_stress_env->target();
-    DestroyDB(checkpoint_dir, opt_copy);
-
-    if (db_stress_env->FileExists(checkpoint_dir).ok()) {
-      // If the directory might still exist, try to delete the files one by one.
-      // Likely a trash file is still there.
-      Status my_s = DestroyDir(db_stress_env, checkpoint_dir);
-      if (!my_s.ok()) {
-        fprintf(stderr, "Fail to destory directory before checkpoint: %s",
-                my_s.ToString().c_str());
-      }
-    }
-
-    Checkpoint* checkpoint = nullptr;
-    Status s = Checkpoint::Create(db_, &checkpoint);
-    if (s.ok()) {
-      s = checkpoint->CreateCheckpoint(checkpoint_dir);
-      if (!s.ok()) {
-        fprintf(stderr, "Fail to create checkpoint to %s\n",
-                checkpoint_dir.c_str());
-        std::vector<std::string> files;
-        Status my_s = db_stress_env->GetChildren(checkpoint_dir, &files);
-        if (my_s.ok()) {
-          for (const auto& f : files) {
-            fprintf(stderr, " %s\n", f.c_str());
-          }
-        } else {
-          fprintf(stderr, "Fail to get files under the directory to %s\n",
-                  my_s.ToString().c_str());
-        }
-      }
-    }
-    std::vector<ColumnFamilyHandle*> cf_handles;
-    DB* checkpoint_db = nullptr;
-    if (s.ok()) {
-      delete checkpoint;
-      checkpoint = nullptr;
-      Options options(options_);
-      options.listeners.clear();
-      std::vector<ColumnFamilyDescriptor> cf_descs;
-      // TODO(ajkr): `column_family_names_` is not safe to access here when
-      // `clear_column_family_one_in != 0`. But we can't easily switch to
-      // `ListColumnFamilies` to get names because it won't necessarily give
-      // the same order as `column_family_names_`.
-      if (FLAGS_clear_column_family_one_in == 0) {
-        for (const auto& name : column_family_names_) {
-          cf_descs.emplace_back(name, ColumnFamilyOptions(options));
-        }
-        s = DB::OpenForReadOnly(DBOptions(options), checkpoint_dir, cf_descs,
-                                &cf_handles, &checkpoint_db);
-      }
-    }
-    if (checkpoint_db != nullptr) {
-      for (auto cfh : cf_handles) {
-        delete cfh;
-      }
-      cf_handles.clear();
-      delete checkpoint_db;
-      checkpoint_db = nullptr;
-    }
-
-    if (!s.ok()) {
-      fprintf(stderr, "A checkpoint operation failed with: %s\n",
-              s.ToString().c_str());
-    } else {
-      DestroyDB(checkpoint_dir, opt_copy);
-    }
-    return s;
-  }
-#endif  // !ROCKSDB_LITE
-
   void VerifyDb(ThreadState* thread) const override {
+    // This `ReadOptions` is for validation purposes. Ignore
+    // `FLAGS_rate_limit_user_ops` to avoid slowing any validation.
     ReadOptions options(FLAGS_verify_checksum, true);
     // We must set total_order_seek to true because we are doing a SeekToFirst
     // on a column family whose memtables may support (by default) prefix-based
@@ -560,6 +474,8 @@ class CfConsistencyStressTest : public StressTest {
       *checksum = ret;
       return iter->status();
     };
+    // This `ReadOptions` is for validation purposes. Ignore
+    // `FLAGS_rate_limit_user_ops` to avoid slowing any validation.
     ReadOptions ropts;
     ropts.total_order_seek = true;
     ropts.snapshot = snapshot_guard.get();

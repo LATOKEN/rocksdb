@@ -6,9 +6,11 @@
 #ifndef ROCKSDB_LITE
 
 #include "utilities/transactions/write_unprepared_txn.h"
+
 #include "db/db_impl/db_impl.h"
 #include "util/cast_util.h"
 #include "utilities/transactions/write_unprepared_txn_db.h"
+#include "utilities/write_batch_with_index/write_batch_with_index_internal.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -279,7 +281,9 @@ Status WriteUnpreparedTxn::FlushWriteBatchToDBInternal(bool prepared) {
     static std::atomic_ullong autogen_id{0};
     // To avoid changing all tests to call SetName, just autogenerate one.
     if (wupt_db_->txn_db_options_.autogenerate_name) {
-      SetName(std::string("autoxid") + ToString(autogen_id.fetch_add(1)));
+      auto s =
+          SetName(std::string("autoxid") + ToString(autogen_id.fetch_add(1)));
+      assert(s.ok());
     } else
 #endif
     {
@@ -354,8 +358,9 @@ Status WriteUnpreparedTxn::FlushWriteBatchToDBInternal(bool prepared) {
   const bool WRITE_AFTER_COMMIT = true;
   const bool first_prepare_batch = log_number_ == 0;
   // MarkEndPrepare will change Noop marker to the appropriate marker.
-  WriteBatchInternal::MarkEndPrepare(GetWriteBatch()->GetWriteBatch(), name_,
-                                     !WRITE_AFTER_COMMIT, !prepared);
+  s = WriteBatchInternal::MarkEndPrepare(GetWriteBatch()->GetWriteBatch(),
+                                         name_, !WRITE_AFTER_COMMIT, !prepared);
+  assert(s.ok());
   // For each duplicate key we account for a new sub-batch
   prepare_batch_cnt_ = GetWriteBatch()->SubBatchCnt();
   // AddPrepared better to be called in the pre-release callback otherwise there
@@ -541,14 +546,15 @@ Status WriteUnpreparedTxn::CommitInternal() {
   // will ignore the Commit marker in non-recovery mode
   WriteBatch* working_batch = GetCommitTimeWriteBatch();
   const bool empty = working_batch->Count() == 0;
-  WriteBatchInternal::MarkCommit(working_batch, name_);
+  auto s = WriteBatchInternal::MarkCommit(working_batch, name_);
+  assert(s.ok());
 
   const bool for_recovery = use_only_the_last_commit_time_batch_for_recovery_;
   if (!empty && for_recovery) {
     // When not writing to memtable, we can still cache the latest write batch.
     // The cached batch will be written to memtable in WriteRecoverableState
     // during FlushMemTable
-    WriteBatchInternal::SetAsLastestPersistentState(working_batch);
+    WriteBatchInternal::SetAsLatestPersistentState(working_batch);
   }
 
   const bool includes_data = !empty && !for_recovery;
@@ -557,7 +563,7 @@ Status WriteUnpreparedTxn::CommitInternal() {
     ROCKS_LOG_WARN(db_impl_->immutable_db_options().info_log,
                    "Duplicate key overhead");
     SubBatchCounter counter(*wpt_db_->GetCFComparatorMap());
-    auto s = working_batch->Iterate(&counter);
+    s = working_batch->Iterate(&counter);
     assert(s.ok());
     commit_batch_cnt = counter.BatchCount();
   }
@@ -583,9 +589,9 @@ Status WriteUnpreparedTxn::CommitInternal() {
   // need to redundantly reference the log that contains the prepared data.
   const uint64_t zero_log_number = 0ull;
   size_t batch_cnt = UNLIKELY(commit_batch_cnt) ? commit_batch_cnt : 1;
-  auto s = db_impl_->WriteImpl(write_options_, working_batch, nullptr, nullptr,
-                               zero_log_number, disable_memtable, &seq_used,
-                               batch_cnt, pre_release_callback);
+  s = db_impl_->WriteImpl(write_options_, working_batch, nullptr, nullptr,
+                          zero_log_number, disable_memtable, &seq_used,
+                          batch_cnt, pre_release_callback);
   assert(!s.ok() || seq_used != kMaxSequenceNumber);
   const SequenceNumber commit_batch_seq = seq_used;
   if (LIKELY(do_one_write || !s.ok())) {
@@ -619,9 +625,11 @@ Status WriteUnpreparedTxn::CommitInternal() {
 
   // Update commit map only from the 2nd queue
   WriteBatch empty_batch;
-  empty_batch.PutLogData(Slice());
+  s = empty_batch.PutLogData(Slice());
+  assert(s.ok());
   // In the absence of Prepare markers, use Noop as a batch separator
-  WriteBatchInternal::InsertNoop(&empty_batch);
+  s = WriteBatchInternal::InsertNoop(&empty_batch);
+  assert(s.ok());
   const bool DISABLE_MEMTABLE = true;
   const size_t ONE_BATCH = 1;
   const uint64_t NO_REF_LOG = 0;
@@ -719,10 +727,14 @@ Status WriteUnpreparedTxn::RollbackInternal() {
   // TODO(lth): We write rollback batch all in a single batch here, but this
   // should be subdivded into multiple batches as well. In phase 2, when key
   // sets are read from WAL, this will happen naturally.
-  WriteRollbackKeys(*tracked_locks_, &rollback_batch, &callback, roptions);
+  s = WriteRollbackKeys(*tracked_locks_, &rollback_batch, &callback, roptions);
+  if (!s.ok()) {
+    return s;
+  }
 
   // The Rollback marker will be used as a batch separator
-  WriteBatchInternal::MarkRollback(rollback_batch.GetWriteBatch(), name_);
+  s = WriteBatchInternal::MarkRollback(rollback_batch.GetWriteBatch(), name_);
+  assert(s.ok());
   bool do_one_write = !db_impl_->immutable_db_options().two_write_queues;
   const bool DISABLE_MEMTABLE = true;
   const uint64_t NO_REF_LOG = 0;
@@ -778,9 +790,11 @@ Status WriteUnpreparedTxn::RollbackInternal() {
                     prepare_seq);
   WriteBatch empty_batch;
   const size_t ONE_BATCH = 1;
-  empty_batch.PutLogData(Slice());
+  s = empty_batch.PutLogData(Slice());
+  assert(s.ok());
   // In the absence of Prepare markers, use Noop as a batch separator
-  WriteBatchInternal::InsertNoop(&empty_batch);
+  s = WriteBatchInternal::InsertNoop(&empty_batch);
+  assert(s.ok());
   s = db_impl_->WriteImpl(write_options_, &empty_batch, nullptr, nullptr,
                           NO_REF_LOG, DISABLE_MEMTABLE, &seq_used, ONE_BATCH,
                           &update_commit_map_with_rollback_batch);
@@ -807,7 +821,11 @@ void WriteUnpreparedTxn::Clear() {
   unflushed_save_points_.reset(nullptr);
   recovered_txn_ = false;
   largest_validated_seq_ = 0;
-  assert(active_iterators_.empty());
+  for (auto& it : active_iterators_) {
+    auto bdit = static_cast<BaseDeltaIterator*>(it);
+    bdit->Invalidate(Status::InvalidArgument(
+        "Cannot use iterator after transaction has finished"));
+  }
   active_iterators_.clear();
   untracked_keys_.clear();
   TransactionBaseImpl::Clear();
@@ -863,11 +881,13 @@ Status WriteUnpreparedTxn::RollbackToSavePointInternal() {
   WriteUnpreparedTxnReadCallback callback(wupt_db_, snap_seq, min_uncommitted,
                                           top.unprep_seqs_,
                                           kBackedByDBSnapshot);
-  WriteRollbackKeys(tracked_keys, &write_batch_, &callback, roptions);
+  s = WriteRollbackKeys(tracked_keys, &write_batch_, &callback, roptions);
+  if (!s.ok()) {
+    return s;
+  }
 
   const bool kPrepared = true;
   s = FlushWriteBatchToDBInternal(!kPrepared);
-  assert(s.ok());
   if (!s.ok()) {
     return s;
   }
@@ -949,6 +969,7 @@ Status WriteUnpreparedTxn::Get(const ReadOptions& options,
              wupt_db_->ValidateSnapshot(snap_seq, backed_by_snapshot))) {
     return res;
   } else {
+    res.PermitUncheckedError();
     wupt_db_->WPRecordTick(TXN_GET_TRY_AGAIN);
     return Status::TryAgain();
   }
@@ -1005,9 +1026,10 @@ Status WriteUnpreparedTxn::ValidateSnapshot(ColumnFamilyHandle* column_family,
 
   WriteUnpreparedTxnReadCallback snap_checker(
       wupt_db_, snap_seq, min_uncommitted, unprep_seqs_, kBackedByDBSnapshot);
-  return TransactionUtil::CheckKeyForConflicts(db_impl_, cfh, key.ToString(),
-                                               snap_seq, false /* cache_only */,
-                                               &snap_checker, min_uncommitted);
+  // TODO(yanqin): Support user-defined timestamp.
+  return TransactionUtil::CheckKeyForConflicts(
+      db_impl_, cfh, key.ToString(), snap_seq, /*ts=*/nullptr,
+      false /* cache_only */, &snap_checker, min_uncommitted);
 }
 
 const std::map<SequenceNumber, size_t>&
